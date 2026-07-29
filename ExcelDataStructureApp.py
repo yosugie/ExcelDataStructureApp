@@ -467,6 +467,17 @@ ORDER_SPACED_RE = re.compile(r"\b(\d{3})\s(\d{3})\b")
 ICN_RE = re.compile(r"ICN(\d+)")
 MULTI_PART_RE = re.compile(r"\b(\d{6,9}(?:\s*;\s*\d{6,9})+)\b")
 
+# Маркировка стандартной готовой заготовки рядом со штрихкодом на эскизе,
+# например "R061" — скрытый штрихкод-текст вида *R061*, по аналогии с
+# *ORD######*. На такие детали программу не пишут и в таблицу их не заносят,
+# поэтому они, как сборочные чертежи и материалы 3мм, идут со снятой
+# галочкой копирования по умолчанию.
+STANDARD_BLANK_RE = re.compile(r"\*R\d+\*")
+
+
+def is_standard_blank(text):
+    return bool(STANDARD_BLANK_RE.search(text))
+
 # Материал с толщиной в тексте PDF, например:
 # "0 ЭР35521 ЛДСП 16 Кашемир U702 СТ9 2800х2070 ..." -> "ЛДСП 16 Кашемир U702 СТ9"
 MATERIAL_PDF_RE = re.compile(
@@ -555,6 +566,7 @@ def parse_pdf_sketches(pdf_path):
             thickness_mm = material_thickness_mm(material)
             is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
             is_excluded_name = is_excluded_part_name(part_name)
+            is_blank = is_standard_blank(text)
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
@@ -566,7 +578,7 @@ def parse_pdf_sketches(pdf_path):
                 "material": material,
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
-                "auto_exclude": is_too_thin or is_excluded_name,
+                "auto_exclude": is_too_thin or is_excluded_name or is_blank,
                 "page": i,
             })
 
@@ -586,9 +598,10 @@ def parse_pdf_sketches(pdf_path):
     if n_not_machinable:
         thickness_list = ", ".join(str(t) for t in sorted(NOT_MACHINABLE_THICKNESS_MM))
         warnings.append(
-            f"Найдено деталей, которые станок не пилит (толщина {thickness_list} мм или "
-            f"особое название вроде «Рейка на щит»): {n_not_machinable} — показаны в таблице "
-            f"для проверки, галочка копирования снята по умолчанию."
+            f"Найдено деталей, которые не идут в работу (толщина {thickness_list} мм, "
+            f"особое название вроде «Рейка на щит», либо маркировка стандартной заготовки "
+            f"вроде «R061»): {n_not_machinable} — показаны в таблице для проверки, галочка "
+            f"копирования снята по умолчанию."
         )
 
     if not results:
