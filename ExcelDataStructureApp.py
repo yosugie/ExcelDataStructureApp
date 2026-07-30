@@ -160,9 +160,13 @@ class CfbContainer:
 
         header = self.data[0:512]
         sector_shift = struct.unpack_from("<H", header, 30)[0]
+        mini_sector_shift = struct.unpack_from("<H", header, 32)[0]
         first_dir_sector = struct.unpack_from("<I", header, 48)[0]
+        self.mini_stream_cutoff = struct.unpack_from("<I", header, 56)[0]
+        first_minifat_sector = struct.unpack_from("<I", header, 60)[0]
         first_difat_sector = struct.unpack_from("<I", header, 68)[0]
         self.sector_size = 1 << sector_shift
+        self.mini_sector_size = 1 << mini_sector_shift
 
         difat = list(struct.unpack_from("<109I", header, 76))
         sec = first_difat_sector
@@ -178,6 +182,12 @@ class CfbContainer:
             s = self._read_sector(sec_id)
             self.fat.extend(struct.unpack_from("<%dI" % (self.sector_size // 4), s, 0))
 
+        # Мини-FAT сам адресуется обычными секторами через self.fat, как и
+        # директория ниже — только его содержимое читается как цепочка
+        # мини-секторов (см. _read_mini_chain).
+        minifat_raw = self._read_chain(first_minifat_sector)
+        self.minifat = list(struct.unpack_from("<%dI" % (len(minifat_raw) // 4), minifat_raw, 0))
+
         dir_data = self._read_chain(first_dir_sector)
         n_entries = len(dir_data) // 128
         self.index = {}
@@ -189,6 +199,14 @@ class CfbContainer:
             start_sec = struct.unpack_from("<I", e, 116)[0]
             stream_size = struct.unpack_from("<Q", e, 120)[0]
             self.index[name] = (start_sec, stream_size)
+
+        # Потоки короче mini_stream_cutoff (обычно 4096 байт) лежат не в
+        # обычных секторах, а в "мини-стриме" — единой цепочке из секторов
+        # Root Entry, разбитой на мини-сектора (обычно 64 байта). Без этого
+        # чтения короткие потоки (например "$$Lib_structure$$" в маленьких
+        # библиотеках) читались бы как случайный мусор из середины файла.
+        root_start_sec, root_size = self.index.get("Root Entry", (ENDOFCHAIN, 0))
+        self.ministream = self._read_chain(root_start_sec, root_size)
 
     def _read_sector(self, sec_id):
         off = 512 + sec_id * self.sector_size
@@ -209,10 +227,25 @@ class CfbContainer:
             result = result[:size]
         return result
 
+    def _read_mini_chain(self, start_sec, size):
+        chunks = []
+        sec = start_sec
+        seen = set()
+        while sec not in (ENDOFCHAIN, FREESECT) and sec < 0xFFFFFFF0:
+            if sec in seen:
+                break
+            seen.add(sec)
+            off = sec * self.mini_sector_size
+            chunks.append(self.ministream[off: off + self.mini_sector_size])
+            sec = self.minifat[sec] if sec < len(self.minifat) else ENDOFCHAIN
+        return b"".join(chunks)[:size]
+
     def get_stream(self, name):
         if name not in self.index:
             return None
         start_sec, size = self.index[name]
+        if name != "Root Entry" and size < self.mini_stream_cutoff:
+            return self._read_mini_chain(start_sec, size)
         return self._read_chain(start_sec, size)
 
 
