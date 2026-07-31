@@ -533,6 +533,23 @@ def extract_part_name_pdf(text: str):
     return m.group(1).strip() if m else None
 
 
+# Пометка "Смотри ДОП. Эскиз" посреди листа — деталь начерчена на отдельном
+# "дополнительном" эскизе, не на этом листе. Обычно следующей строкой идёт
+# логин конструктора, например "a.rohin" (в остальном тексте отчёта тоже
+# встречаются такие логины, например "e.orhoyan"). Логин захватывается,
+# только если следующая строка похожа на него (начинается с буквы) — иначе
+# это уже нумерованный список кромок ("1 -..."), и имя не подставляется.
+EXTRA_SKETCH_RE = re.compile(r"Смотри\s+ДОП\.\s*Эскиз(?:\s*\n\s*([A-Za-zА-Яа-яЁё][\w.\-]*))?")
+
+
+def extract_extra_sketch_note(text: str):
+    m = EXTRA_SKETCH_RE.search(text)
+    if not m:
+        return None
+    name = m.group(1)
+    return f"Смотри ДОП. Эскиз {name}" if name else "Смотри ДОП. Эскиз"
+
+
 def extract_order_number(text: str):
     """Извлечь номер заказа, убрать пробелы."""
     m = ORDER_RE.search(text)
@@ -596,6 +613,7 @@ def parse_pdf_sketches(pdf_path):
             part = extract_part_numbers(text) if text.strip() else None
             material = extract_material_pdf(text) if text.strip() else None
             part_name = extract_part_name_pdf(text) if text.strip() else None
+            extra_sketch = extract_extra_sketch_note(text) if text.strip() else None
             thickness_mm = material_thickness_mm(material)
             is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
             is_excluded_name = is_excluded_part_name(part_name)
@@ -609,6 +627,7 @@ def parse_pdf_sketches(pdf_path):
                 "part_code": part,
                 "description": part_name or "",
                 "material": material,
+                "extra_sketch": extra_sketch,
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
                 "auto_exclude": is_too_thin or is_excluded_name or is_blank,
@@ -776,7 +795,7 @@ class SketchExtractorApp:
         self.tree_frame = tree_frame = tk.Frame(root)
         tree_frame.pack(fill="both", expand=True, padx=8, pady=4)
 
-        columns = ("include", "date", "order", "part", "type", "edge", "material", "description", "page", "folder")
+        columns = ("include", "date", "order", "part", "type", "edge", "material", "description", "extra_sketch", "page", "folder")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
         headers = {
             "include": "Копир.",
@@ -787,12 +806,13 @@ class SketchExtractorApp:
             "edge": "Кромка",
             "material": "Материал",
             "description": "Описание",
+            "extra_sketch": "Доп. эскиз",
             "page": "Страница",
             "folder": "Папка / файл",
         }
         widths = {
             "include": 55, "date": 90, "order": 80, "part": 100, "type": 100,
-            "edge": 60, "material": 260, "description": 220, "page": 70, "folder": 200,
+            "edge": 60, "material": 260, "description": 220, "extra_sketch": 150, "page": 70, "folder": 200,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1177,6 +1197,7 @@ class SketchExtractorApp:
                 "edge": "/",
                 "material": item.get("material") or "",
                 "description": item["description"],
+                "extra_sketch": item.get("extra_sketch") or "-",
                 "page": str(item["page"]) if "page" in item else "-",
                 "folder": item["source_dir"] or item.get("raw_name", ""),
                 "is_assembly": is_assembly,
@@ -1185,7 +1206,8 @@ class SketchExtractorApp:
             self.tree.insert("", tk.END, values=(
                 "☑" if row["include"] else "☐",
                 row["date"], row["order"], row["part"], row["type"],
-                row["edge"], row["material"], row["description"], row["page"], row["folder"],
+                row["edge"], row["material"], row["description"], row["extra_sketch"],
+                row["page"], row["folder"],
             ), tags=("assembly",) if auto_exclude else ())
             self.current_rows.append(row)
 
