@@ -547,7 +547,7 @@ def extract_extra_sketch_note(text: str):
     if not m:
         return None
     name = m.group(1)
-    return f"Смотри ДОП. Эскиз {name}" if name else "Смотри ДОП. Эскиз"
+    return name if name else "Смотри ДОП. Эскиз"
 
 
 def extract_order_number(text: str):
