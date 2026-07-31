@@ -795,24 +795,24 @@ class SketchExtractorApp:
         self.tree_frame = tree_frame = tk.Frame(root)
         tree_frame.pack(fill="both", expand=True, padx=8, pady=4)
 
-        columns = ("include", "date", "order", "part", "type", "edge", "material", "description", "extra_sketch", "page", "folder")
+        columns = ("include", "page", "date", "order", "part", "description", "material", "edge", "extra_sketch", "type")
+        self.columns = columns
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
         headers = {
             "include": "Копир.",
+            "page": "Страница",
             "date": "Дата запуска",
             "order": "№ заказа",
             "part": "№ детали",
-            "type": "Тип эскиза",
-            "edge": "Кромка",
-            "material": "Материал",
             "description": "Описание",
+            "material": "Материал",
+            "edge": "Кромка",
             "extra_sketch": "Доп. эскиз",
-            "page": "Страница",
-            "folder": "Папка / файл",
+            "type": "Тип эскиза",
         }
         widths = {
-            "include": 55, "date": 90, "order": 80, "part": 100, "type": 100,
-            "edge": 60, "material": 260, "description": 220, "extra_sketch": 150, "page": 70, "folder": 200,
+            "include": 55, "page": 70, "date": 90, "order": 80, "part": 100,
+            "description": 220, "material": 260, "edge": 60, "extra_sketch": 150, "type": 100,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -972,9 +972,10 @@ class SketchExtractorApp:
 
     def refresh_date_column(self):
         new_date = self.date_var.get()
+        idx = self.columns.index("date")
         for iid in self.tree.get_children():
             vals = list(self.tree.item(iid, "values"))
-            vals[1] = new_date  # индекс столбца "date"
+            vals[idx] = new_date
             self.tree.item(iid, values=vals)
 
     def toggle_row_include(self, iid):
@@ -1113,10 +1114,11 @@ class SketchExtractorApp:
 
     def on_type_change(self, event=None):
         new_type = self.type_var.get()
+        idx = self.columns.index("type")
         for iid, row in zip(self.tree.get_children(), self.current_rows):
             row["type"] = new_type
             vals = list(self.tree.item(iid, "values"))
-            vals[4] = new_type  # индекс столбца "type"
+            vals[idx] = new_type
             self.tree.item(iid, values=vals)
 
     def run_parse(self):
@@ -1199,15 +1201,14 @@ class SketchExtractorApp:
                 "description": item["description"],
                 "extra_sketch": item.get("extra_sketch") or "-",
                 "page": str(item["page"]) if "page" in item else "-",
-                "folder": item["source_dir"] or item.get("raw_name", ""),
                 "is_assembly": is_assembly,
                 "include": not auto_exclude,  # сборочные чертежи и материалы 3мм по умолчанию не копируем
             }
             self.tree.insert("", tk.END, values=(
                 "☑" if row["include"] else "☐",
-                row["date"], row["order"], row["part"], row["type"],
-                row["edge"], row["material"], row["description"], row["extra_sketch"],
-                row["page"], row["folder"],
+                row["page"], row["date"], row["order"], row["part"],
+                row["description"], row["material"], row["edge"], row["extra_sketch"],
+                row["type"],
             ), tags=("assembly",) if auto_exclude else ())
             self.current_rows.append(row)
 
