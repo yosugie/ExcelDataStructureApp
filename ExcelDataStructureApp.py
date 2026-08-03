@@ -1067,9 +1067,10 @@ class SketchExtractorApp:
         style.configure("Treeview.Heading", background=t["bg"], foreground=t["text"], relief="flat")
         style.map("Treeview.Heading", background=[("active", t["bg"])])
         style.configure(
-            "TScrollbar", background=t["accent"], troughcolor=t["bg"],
-            bordercolor=t["bg"], arrowcolor=t["text"],
+            "TScrollbar", background=t["input"], troughcolor=t["bg"],
+            bordercolor=t["border"], arrowcolor=t["accent"],
         )
+        style.map("TScrollbar", arrowcolor=[("pressed", t["accent"]), ("active", t["accent"])])
         self.tree.tag_configure("assembly", background=t["input"], foreground=t["muted"])
 
     def show_message(self, title, message):
