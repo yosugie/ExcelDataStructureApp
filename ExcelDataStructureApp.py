@@ -927,12 +927,56 @@ class SketchExtractorApp:
         self.tree.bind("<Button-1>", self.on_tree_click)
         self.tree.bind("<space>", self.on_tree_space)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        # Свои скроллбары (CTkScrollbar — толстый скруглённый акцентный
+        # "ползунок", как в референсе) со стрелками-кнопками по краям —
+        # у CTkScrollbar самого по себе стрелок нет, дорисовываем вручную.
+        vscroll_frame = ctk.CTkFrame(tree_frame, fg_color=t["card"])
+        self._reg(vscroll_frame, "plain_frame")
+        up_btn = ctk.CTkButton(
+            vscroll_frame, text="▲", width=20, height=20, corner_radius=6,
+            command=lambda: self.tree.yview_scroll(-1, "units"),
+        )
+        up_btn.pack(side="top", pady=(0, 2))
+        self._reg(up_btn, "scroll_arrow")
+        self.vsb = ctk.CTkScrollbar(
+            vscroll_frame, orientation="vertical", command=self.tree.yview,
+            corner_radius=8, width=14,
+        )
+        self.vsb.pack(side="top", fill="y", expand=True)
+        self._reg(self.vsb, "scrollbar")
+        down_btn = ctk.CTkButton(
+            vscroll_frame, text="▼", width=20, height=20, corner_radius=6,
+            command=lambda: self.tree.yview_scroll(1, "units"),
+        )
+        down_btn.pack(side="top", pady=(2, 0))
+        self._reg(down_btn, "scroll_arrow")
+        self.tree.configure(yscrollcommand=self.vsb.set)
+
+        hscroll_frame = ctk.CTkFrame(tree_frame, fg_color=t["card"])
+        self._reg(hscroll_frame, "plain_frame")
+        left_btn = ctk.CTkButton(
+            hscroll_frame, text="◀", width=20, height=20, corner_radius=6,
+            command=lambda: self.tree.xview_scroll(-1, "units"),
+        )
+        left_btn.pack(side="left", padx=(0, 2))
+        self._reg(left_btn, "scroll_arrow")
+        self.hsb = ctk.CTkScrollbar(
+            hscroll_frame, orientation="horizontal", command=self.tree.xview,
+            corner_radius=8, height=14,
+        )
+        self.hsb.pack(side="left", fill="x", expand=True)
+        self._reg(self.hsb, "scrollbar")
+        right_btn = ctk.CTkButton(
+            hscroll_frame, text="▶", width=20, height=20, corner_radius=6,
+            command=lambda: self.tree.xview_scroll(1, "units"),
+        )
+        right_btn.pack(side="left", padx=(2, 0))
+        self._reg(right_btn, "scroll_arrow")
+        self.tree.configure(xscrollcommand=self.hsb.set)
+
         self.tree.grid(row=0, column=0, sticky="nsew", padx=(14, 0), pady=(14, 0))
-        vsb.grid(row=0, column=1, sticky="ns", pady=(14, 0), padx=(0, 14))
-        hsb.grid(row=1, column=0, sticky="ew", padx=(14, 0), pady=(0, 14))
+        vscroll_frame.grid(row=0, column=1, sticky="ns", pady=(14, 8), padx=(6, 14))
+        hscroll_frame.grid(row=1, column=0, sticky="ew", padx=(14, 6), pady=(0, 14))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
@@ -1050,13 +1094,19 @@ class SketchExtractorApp:
                     scrollbar_button_color=t["border"], scrollbar_button_hover_color=t["muted"],
                     bg_color=surface_color,
                 )
+            elif kind == "scrollbar":
+                widget.configure(fg_color=t["bg"], button_color=t["accent"], button_hover_color=t["accent_hover"], bg_color=surface_color)
+            elif kind == "scroll_arrow":
+                widget.configure(fg_color=t["card"], hover_color=t["input"], text_color=t["accent"], bg_color=surface_color)
 
         # Кнопка копирования — акцентная, но пока идёт "вспышка" успеха
         # (см. flash_copy_button), не возвращаем её к акценту досрочно.
         if self._copy_btn_reset_job is None:
             self.copy_btn.configure(fg_color=t["accent"], hover_color=t["accent_hover"], text_color=t["accent_text"])
 
-        # ttk-виджеты (Treeview, Scrollbar) — не CustomTkinter, стилизуются через ttk.Style.
+        # ttk-виджет (Treeview) — не CustomTkinter, стилизуется через ttk.Style.
+        # Прокрутка — свои CTkScrollbar + кнопки-стрелки (см. регистр выше),
+        # обычный ttk.Scrollbar не используется.
         style = ttk.Style()
         style.theme_use("clam")
         style.configure(
@@ -1066,11 +1116,6 @@ class SketchExtractorApp:
         style.map("Treeview", background=[("selected", t["accent"])], foreground=[("selected", t["accent_text"])])
         style.configure("Treeview.Heading", background=t["bg"], foreground=t["text"], relief="flat")
         style.map("Treeview.Heading", background=[("active", t["bg"])])
-        style.configure(
-            "TScrollbar", background=t["input"], troughcolor=t["bg"],
-            bordercolor=t["border"], arrowcolor=t["accent"],
-        )
-        style.map("TScrollbar", arrowcolor=[("pressed", t["accent"]), ("active", t["accent"])])
         self.tree.tag_configure("assembly", background=t["input"], foreground=t["muted"])
 
     def show_message(self, title, message):
