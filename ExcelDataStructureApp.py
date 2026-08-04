@@ -1029,6 +1029,15 @@ class SketchExtractorApp:
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
+        # Надпись "Эскизов нет!" поверх пустой таблицы — чтобы сразу было видно
+        # на экране, что в заказе не нашлось ни одного эскиза, без необходимости
+        # разворачивать журнал и искать там предупреждение. Скрыта по умолчанию,
+        # показывается/прячется через _set_empty_state().
+        self.empty_state_label = ctk.CTkLabel(
+            tree_frame, text="Эскизов нет!", font=ctk.CTkFont(size=20, weight="bold"),
+        )
+        self._reg(self.empty_state_label, "empty_state_label")
+
         # --- Кнопки действий ---
         btn_frame = ctk.CTkFrame(root, fg_color=t["bg"])
         btn_frame.pack(fill="x", padx=8, pady=6)
@@ -1119,6 +1128,8 @@ class SketchExtractorApp:
                 widget.configure(text_color=t["text"], bg_color=surface_color)
             elif kind == "muted_label":
                 widget.configure(text_color=t["muted"], bg_color=surface_color)
+            elif kind == "empty_state_label":
+                widget.configure(text_color=t["muted"], fg_color=t["card"], bg_color=surface_color)
             elif kind == "card":
                 widget.configure(fg_color=t["card"], border_color=t["border"], bg_color=surface_color)
             elif kind == "plain_frame":
@@ -1168,6 +1179,12 @@ class SketchExtractorApp:
         style.configure("Treeview.Heading", background=t["bg"], foreground=t["text"], relief="flat")
         style.map("Treeview.Heading", background=[("active", t["bg"])])
         self.tree.tag_configure("assembly", background=t["input"], foreground=t["muted"])
+
+    def _set_empty_state(self, show):
+        if show:
+            self.empty_state_label.place(in_=self.tree, relx=0.5, rely=0.5, anchor="center")
+        else:
+            self.empty_state_label.place_forget()
 
     def show_message(self, title, message):
         MessageDialog(self.root, THEMES[self.theme], self._icon_imgs, self.theme, title, message)
@@ -1302,6 +1319,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = None
+        self._set_empty_state(False)
         self.type_var.set("")
         self.type_combo.configure(state="disabled")
         self.log_text.configure(state="normal")
@@ -1366,6 +1384,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = kind
+        self._set_empty_state(False)
 
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", tk.END)
@@ -1432,6 +1451,7 @@ class SketchExtractorApp:
             ), tags=("assembly",) if auto_exclude else ())
             self.current_rows.append(row)
 
+        self._set_empty_state(not results)
         self.status_var.set(f"Найдено эскизов: {len(results)}")
 
     def copy_for_table(self):
