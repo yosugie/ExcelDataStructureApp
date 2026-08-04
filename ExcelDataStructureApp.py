@@ -380,11 +380,6 @@ NOT_MACHINABLE_PART_NAMES = {
     "гор. щит конц. 1дв.2 кр. прав.",
     "полка концевая",
     "гор. щит угловой диаг.",
-    # в тексте PDF после названия идёт угол среза ("... 2 скоса 45"), но
-    # extract_part_name_pdf() отбрасывает его как число-количество перед
-    # размерами (та же логика, что для "Панель под рейки 2 267.0*") — здесь
-    # это удачно совпадает и с "45", и с любым другим углом.
-    "щит задний диаг. 2 скоса",
 }
 
 
@@ -598,6 +593,17 @@ def extract_part_name_pdf(text: str):
     return m.group(1).strip() if m else None
 
 
+# "Щит задний диаг. 2 скоса" со срезом 45° станок не пилит, а 90° — пилит,
+# так что по одному только названию не различить (extract_part_name_pdf
+# отбрасывает угол как число-количество перед размерами, как и "2" в
+# "Панель под рейки 2 267.0*") — угол ищем прямо в тексте отдельно.
+DIAGONAL_45_RE = re.compile(r"Щит\s+задний\s+диаг\.\s*2\s*скоса\s+45\b")
+
+
+def is_unmachinable_diagonal_cut(text):
+    return bool(DIAGONAL_45_RE.search(text))
+
+
 # Пометка "Смотри ДОП. Эскиз" посреди листа — деталь начерчена на отдельном
 # "дополнительном" эскизе, не на этом листе. Обычно следующей строкой идёт
 # логин конструктора, например "a.rohin" (в остальном тексте отчёта тоже
@@ -683,6 +689,7 @@ def parse_pdf_sketches(pdf_path):
             is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
             is_excluded_name = is_excluded_part_name(part_name)
             is_blank = is_standard_blank(text)
+            is_bad_diagonal = is_unmachinable_diagonal_cut(text)
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
@@ -695,7 +702,7 @@ def parse_pdf_sketches(pdf_path):
                 "extra_sketch": extra_sketch,
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
-                "auto_exclude": is_too_thin or is_excluded_name or is_blank,
+                "auto_exclude": is_too_thin or is_excluded_name or is_blank or is_bad_diagonal,
                 "page": i,
             })
 
