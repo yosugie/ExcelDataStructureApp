@@ -502,7 +502,8 @@ def parse_bln_sketches(bln_path):
             else:
                 section = None
             part_codes = [f"{section} СБ" if section else "СБ"]
-            description = f"[Сборочный чертёж, галочка снята] {fname}"
+            if not description:
+                description = os.path.splitext(fname)[0]
         elif is_too_thin or is_excluded_name:
             n_not_machinable += 1
 
