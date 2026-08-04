@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# pyinstaller (сборка .exe)
+build/
+dist/
+*.spec
+
+# виртуальное окружение
+venv/
+.venv/
