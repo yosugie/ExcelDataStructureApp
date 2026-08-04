@@ -323,6 +323,14 @@ DESC_RE = re.compile(r"\(([^)]*)\)")
 ASSEMBLY_WORD_RE = re.compile(r"\bСБ\b", re.IGNORECASE)
 ASSEMBLY_SECTION_RE = re.compile(r"(\d{2})\s+СБ", re.IGNORECASE)
 
+# Тот же признак сборочного чертежа, но найденный прямо в бинарных данных
+# (заголовок вида "215080 01 СБ"), а не в имени файла — файл в папке "эск"
+# иногда экспортируется под именем без "СБ" вовсе (например
+# "1 Фасад 236х446 Лист1.ldw"), при том что внутри чертёж всё равно подписан
+# как сборочный. По аналогии с CODE_IN_STREAM_RE (номер заказа+секция), но
+# вместо номера детали — буквы "СБ".
+ASSEMBLY_CODE_IN_STREAM_RE = re.compile(rb"(\d{5,7})\s+(\d{2})\s+\xd0\xa1\xd0\x91")
+
 # Материал детали, зашитый в бинарных данных чертежа как строка UTF-8 с
 # 4-байтовым числом (длина строки) прямо перед ней, например:
 # "ЛДСП 16 Белый премиум W1000 ST9 (Артикул ЭР00442)"
@@ -445,9 +453,13 @@ def parse_bln_sketches(bln_path):
         description = ""
         material = None
         is_assembly = is_assembly_filename(fname)
+        content_assembly_m = None
 
         stream = container.get_stream(storage)
         if stream:
+            if not is_assembly:
+                content_assembly_m = ASSEMBLY_CODE_IN_STREAM_RE.search(stream)
+                is_assembly = bool(content_assembly_m)
             if not is_assembly:
                 # Один лист иногда содержит сразу две детали (например одна
                 # заготовка распиливается на две) — берём все найденные коды,
@@ -461,7 +473,7 @@ def parse_bln_sketches(bln_path):
                         seen.add(candidate_part)
                         part_codes.append(candidate_part)
             else:
-                code_m = CODE_IN_STREAM_RE.search(stream)
+                code_m = CODE_IN_STREAM_RE.search(stream) or content_assembly_m
                 if code_m:
                     order_number = code_m.group(1).decode()
             material = extract_material(stream)
@@ -483,7 +495,13 @@ def parse_bln_sketches(bln_path):
         if is_assembly:
             n_assembly += 1
             sec_m = ASSEMBLY_SECTION_RE.search(fname)
-            part_codes = [f"{sec_m.group(1)} СБ" if sec_m else "СБ"]
+            if sec_m:
+                section = sec_m.group(1)
+            elif content_assembly_m:
+                section = content_assembly_m.group(2).decode()
+            else:
+                section = None
+            part_codes = [f"{section} СБ" if section else "СБ"]
             description = f"[Сборочный чертёж, галочка снята] {fname}"
         elif is_too_thin or is_excluded_name:
             n_not_machinable += 1
