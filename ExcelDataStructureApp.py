@@ -35,8 +35,6 @@
     pip install pdfplumber customtkinter
     (опционально, для drag-and-drop) pip install tkinterdnd2
     (опционально, для кнопки-календаря у поля даты) pip install tkcalendar
-    (опционально, для копирования в Excel шрифтом Calibri Light —
-     только Windows) pip install pywin32
     python ExcelDataStructureApp.py
 """
 
@@ -71,12 +69,6 @@ try:
     HAS_TKCALENDAR = True
 except ImportError:
     HAS_TKCALENDAR = False
-
-try:
-    import win32clipboard
-    HAS_WIN32CLIPBOARD = True
-except ImportError:
-    HAS_WIN32CLIPBOARD = False
 
 VK_C = 67
 VK_V = 86
@@ -201,81 +193,6 @@ def fix_clipboard_shortcuts(widget):
         return None
 
     widget.bind("<Control-KeyPress>", handler)
-
-
-# ---------------------------------------------------------------------------
-# Копирование в буфер шрифтом Calibri Light 12 обычным начертанием — Excel
-# при вставке ориентируется на формат буфера CF_HTML (если он есть), а не на
-# обычный текст, поэтому просто положить текст в буфер (как раньше) для
-# управления шрифтом недостаточно. Работает только на Windows с pywin32
-# (HAS_WIN32CLIPBOARD) — на остальных платформах используется обычный
-# текстовый буфер без явного шрифта (см. copy_rows_to_excel_clipboard).
-# ---------------------------------------------------------------------------
-
-# Только шрифт — пользователь уже сам настроил формат ячеек в своей
-# Excel-таблице (весь столбец заранее переведён в текстовый формат), так
-# что программе тут указывать формат/выравнивание не нужно и не стоит —
-# только это, ничего больше.
-EXCEL_CELL_FONT_CSS = "font-family:'Calibri Light'; font-size:12pt; font-weight:normal; font-style:normal;"
-
-
-def _html_escape(value):
-    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _build_cf_html(row_values):
-    """Собирает байты формата буфера обмена CF_HTML (см. спецификацию
-    Microsoft "HTML Clipboard Format") — заголовок со смещениями (в байтах
-    UTF-8 от начала всей строки, включая сам заголовок) до начала/конца
-    HTML и до начала/конца самого фрагмента."""
-    style = EXCEL_CELL_FONT_CSS
-    rows_html = []
-    for row in row_values:
-        cells = "".join(f'<td style="{style}">{_html_escape(v)}</td>' for v in row)
-        rows_html.append(f"<tr>{cells}</tr>")
-    fragment = "<table>" + "".join(rows_html) + "</table>"
-    prefix = "<html><body><!--StartFragment-->"
-    suffix = "<!--EndFragment--></body></html>"
-    header_template = (
-        "Version:0.9\r\n"
-        "StartHTML:{start_html:08d}\r\n"
-        "EndHTML:{end_html:08d}\r\n"
-        "StartFragment:{start_fragment:08d}\r\n"
-        "EndFragment:{end_fragment:08d}\r\n"
-    )
-    header_len = len(header_template.format(start_html=0, end_html=0, start_fragment=0, end_fragment=0).encode("utf-8"))
-    start_html = header_len
-    start_fragment = start_html + len(prefix.encode("utf-8"))
-    end_fragment = start_fragment + len(fragment.encode("utf-8"))
-    end_html = end_fragment + len(suffix.encode("utf-8"))
-    header = header_template.format(
-        start_html=start_html, end_html=end_html,
-        start_fragment=start_fragment, end_fragment=end_fragment,
-    )
-    return (header + prefix + fragment + suffix).encode("utf-8")
-
-
-def copy_rows_to_excel_clipboard(root, text, row_values):
-    """Кладёт в буфер и обычный текст, и CF_HTML с явным шрифтом Calibri
-    Light 12 — Excel при вставке использует именно HTML-формат буфера, если
-    он есть. Возвращает (True, None), если удалось (Windows + установлен
-    pywin32); иначе (False, причина) — тогда вызывающий код сам копирует
-    обычным текстом через tkinter, как раньше, а причину стоит показать в
-    журнале, чтобы не гадать вслепую, почему шрифт не применился."""
-    if not HAS_WIN32CLIPBOARD:
-        return False, 'модуль "pywin32" не установлен'
-    try:
-        win32clipboard.OpenClipboard()
-        try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
-            cf_html = win32clipboard.RegisterClipboardFormat("HTML Format")
-            win32clipboard.SetClipboardData(cf_html, _build_cf_html(row_values))
-        finally:
-            win32clipboard.CloseClipboard()
-        return True, None
-    except Exception as e:
-        return False, str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -666,13 +583,13 @@ def parse_bln_sketches(bln_path):
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
             f"{n_not_machinable} — показаны в таблице серым, копирование по умолчанию "
-            f'исключено (можно поправить в "Исключениях").'
+            f'исключено (можно поправить в "Что копировать").'
         )
 
     if n_assembly:
         warnings.append(
             f"Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице серым, "
-            f'копирование по умолчанию исключено (можно поправить в "Исключениях").'
+            f'копирование по умолчанию исключено (можно поправить в "Что копировать").'
         )
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
@@ -877,7 +794,7 @@ def parse_pdf_sketches(pdf_path):
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
             f"{n_not_machinable} — показаны в таблице серым, копирование по умолчанию "
-            f'исключено (можно поправить в "Исключениях").'
+            f'исключено (можно поправить в "Что копировать").'
         )
 
     if not results:
@@ -966,23 +883,23 @@ class MessageDialog(ctk.CTkToplevel):
         self.wait_window()
 
 
-class ExclusionDialog(ctk.CTkToplevel):
+class CopySelectionDialog(ctk.CTkToplevel):
     """Список всех видов деталей (по столбцу "Описание"), найденных при
-    последнем разборе файла — с галочками. По умолчанию отмечены (и
-    вынесены наверх списка) те виды, что программа сама исключает из
-    копирования (сборка/стекло/3мм и т.п.), но пользователь может
-    отметить/снять отметку с любого вида вручную — все строки этого вида
-    сразу красятся серым в таблице и перестают копироваться в буфер (или
-    наоборот, если снять отметку с автоматического исключения).
+    последнем разборе файла — с галочками. Галочка = "этот вид копируем в
+    буфер". По умолчанию сняты (и вынесены наверх списка, чтобы сразу были
+    на виду) те виды, что программа сама считает не идущими на станок
+    (сборка/стекло/3мм и т.п.), — но пользователь может отметить/снять
+    отметку с любого вида вручную: все строки этого вида сразу перестают
+    краситься серым в таблице и начинают копироваться (или наоборот).
 
     "Сбросить" возвращает только автоматику (убирает все ручные
-    переопределения), "Очистить" снимает вообще все галочки (включая
-    автоматические — временно копируем вообще всё), "Готово" просто
+    переопределения), "Выбрать всё" отмечает вообще все виды (включая те,
+    что программа сняла сама — временно копируем всё), "Готово" просто
     закрывает окно — все изменения уже применяются сразу по клику."""
 
-    def __init__(self, master, colors, icon_images, theme, counts, checked_state, on_toggle, on_reset, on_clear):
+    def __init__(self, master, colors, icon_images, theme, counts, checked_state, on_toggle, on_reset, on_select_all):
         super().__init__(master)
-        self.title("Исключения из копирования")
+        self.title("Что копировать")
         self.resizable(False, False)
         self.configure(fg_color=colors["bg"])
         self.transient(master)
@@ -999,7 +916,7 @@ class ExclusionDialog(ctk.CTkToplevel):
         self._content.grid(row=0, column=0, padx=16, pady=16)
 
         ctk.CTkLabel(
-            self._content, text="Отметьте виды деталей, которые не нужно копировать в буфер:",
+            self._content, text="Отметьте виды деталей, которые нужно копировать в буфер:",
             text_color=colors["text"], wraplength=360, justify="left",
         ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
 
@@ -1020,7 +937,7 @@ class ExclusionDialog(ctk.CTkToplevel):
             text_color=colors["text"], border_width=1, border_color=colors["border"],
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
-            btn_row, text="Очистить", command=on_clear, width=100, height=32,
+            btn_row, text="Выбрать всё", command=on_select_all, width=110, height=32,
             corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
             text_color=colors["text"], border_width=1, border_color=colors["border"],
         ).pack(side="left", padx=(0, 8))
@@ -1038,13 +955,15 @@ class ExclusionDialog(ctk.CTkToplevel):
 
     def _build_checklist(self, counts, checked_state):
         colors = self._colors
+        # Неотмеченные (то, что не копируем) — наверх списка: это как раз
+        # исключения, которые пользователь и хочет видеть сразу.
         items = sorted(
             counts.items(),
-            key=lambda pair: (not checked_state.get(pair[0], False), (pair[0] or "").lower()),
+            key=lambda pair: (checked_state.get(pair[0], True), (pair[0] or "").lower()),
         )
         for description, count in items:
             label = f"{description or '(без названия)'} ({count})"
-            var = tk.BooleanVar(value=checked_state.get(description, False))
+            var = tk.BooleanVar(value=checked_state.get(description, True))
             ctk.CTkCheckBox(
                 self._scroll, text=label, variable=var,
                 text_color=colors["text"], fg_color=colors["accent"],
@@ -1167,12 +1086,12 @@ class SketchExtractorApp:
         self.today_btn.pack(side="left")
         self._reg(self.today_btn, "secondary_button")
 
-        self.exclusions_btn = ctk.CTkButton(
-            date_row, text="Исключения", command=self.open_exclusions_dialog,
-            height=32, width=120, corner_radius=20,
+        self.copy_selection_btn = ctk.CTkButton(
+            date_row, text="Что копировать", command=self.open_copy_selection_dialog,
+            height=32, width=140, corner_radius=20,
         )
-        self.exclusions_btn.pack(side="right")
-        self._reg(self.exclusions_btn, "secondary_button")
+        self.copy_selection_btn.pack(side="right")
+        self._reg(self.copy_selection_btn, "secondary_button")
 
         # --- Статус-строка ---
         self.status_var = tk.StringVar(value="")
@@ -1322,11 +1241,12 @@ class SketchExtractorApp:
 
         self.current_rows = []  # список dict-ов с результатами разбора
         self.current_kind = None  # "bazis" или "pdf"
-        # Ручные переопределения из диалога "Исключения": {"Описание": bool}.
-        # Есть запись — воля пользователя побеждает; нет — используется
-        # "auto_exclude" конкретной строки (см. _apply_row_styling).
+        # Ручные переопределения из диалога "Что копировать":
+        # {"Описание": копировать_ли}. Есть запись — воля пользователя
+        # побеждает; нет — используется "auto_exclude" конкретной строки
+        # (см. _apply_row_styling).
         self.description_overrides = {}
-        self._exclusion_dialog = None
+        self._copy_selection_dialog = None
 
         self.apply_theme()
 
@@ -1429,62 +1349,63 @@ class SketchExtractorApp:
     def show_message(self, title, message):
         MessageDialog(self.root, THEMES[self.theme], self._icon_imgs, self.theme, title, message)
 
-    def _exclusion_counts_and_state(self):
+    def _copy_selection_counts_and_state(self):
         counts = {}
-        any_auto_excluded = {}
+        all_auto_included = {}
         for row in self.current_rows:
             d = row["description"]
             counts[d] = counts.get(d, 0) + 1
-            any_auto_excluded[d] = any_auto_excluded.get(d, False) or row["auto_exclude"]
-        # Показываем галочку по умолчанию, если хоть одна строка этого вида
-        # программа сама исключила (или явно выбрано вручную ранее) — но
-        # пока пользователь не кликнет по галочке сам, это только для
-        # наглядности в диалоге и не трогает состояние отдельных строк
-        # (см. _apply_row_styling — там в силе остаётся "auto_exclude"
-        # каждой строки, если явного выбора для этого вида ещё не было).
+            included = not row["auto_exclude"]
+            all_auto_included[d] = all_auto_included.get(d, True) and included
+        # Галочка снята по умолчанию, если хоть одну строку этого вида
+        # программа сама исключила (или так выбрано вручную ранее) — но пока
+        # пользователь не кликнет по галочке сам, это только для наглядности
+        # в диалоге и не трогает состояние отдельных строк (см.
+        # _apply_row_styling — там в силе остаётся "auto_exclude" каждой
+        # строки, если явного выбора для этого вида ещё не было).
         checked_state = {
-            d: self.description_overrides.get(d, any_auto_excluded[d]) for d in counts
+            d: self.description_overrides.get(d, all_auto_included[d]) for d in counts
         }
         return counts, checked_state
 
-    def open_exclusions_dialog(self):
+    def open_copy_selection_dialog(self):
         if not self.current_rows:
             self.show_message("Нечего показывать", "Сначала разберите файл.")
             return
-        counts, checked_state = self._exclusion_counts_and_state()
-        self._exclusion_dialog = ExclusionDialog(
+        counts, checked_state = self._copy_selection_counts_and_state()
+        self._copy_selection_dialog = CopySelectionDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            counts, checked_state, self.toggle_description_exclusion,
-            self.reset_exclusions_to_auto, self.clear_all_exclusions,
+            counts, checked_state, self.toggle_description_copying,
+            self.reset_copy_selection_to_auto, self.select_all_for_copying,
         )
 
-    def _refresh_exclusion_dialog(self):
-        if self._exclusion_dialog is not None and self._exclusion_dialog.winfo_exists():
-            self._exclusion_dialog.refresh(*self._exclusion_counts_and_state())
+    def _refresh_copy_selection_dialog(self):
+        if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
+            self._copy_selection_dialog.refresh(*self._copy_selection_counts_and_state())
 
-    def toggle_description_exclusion(self, description, is_excluded):
-        self.description_overrides[description] = is_excluded
+    def toggle_description_copying(self, description, is_included):
+        self.description_overrides[description] = is_included
         self._apply_row_styling()
 
-    def reset_exclusions_to_auto(self):
+    def reset_copy_selection_to_auto(self):
         # Убирает ручные переопределения — состояние снова решает только
         # "auto_exclude" (то, что программа сама нашла при разборе файла).
         self.description_overrides = {}
         self._apply_row_styling()
-        self._refresh_exclusion_dialog()
+        self._refresh_copy_selection_dialog()
 
-    def clear_all_exclusions(self):
-        # Снимает вообще все галочки — временно копируется всё, включая то,
+    def select_all_for_copying(self):
+        # Отмечает вообще все виды — временно копируется всё, включая то,
         # что программа сама считает не идущим на станок.
-        self.description_overrides = {row["description"]: False for row in self.current_rows}
+        self.description_overrides = {row["description"]: True for row in self.current_rows}
         self._apply_row_styling()
-        self._refresh_exclusion_dialog()
+        self._refresh_copy_selection_dialog()
 
     def _apply_row_styling(self):
         for iid, row in zip(self.tree.get_children(), self.current_rows):
-            excluded = self.description_overrides.get(row["description"], row["auto_exclude"])
-            row["include"] = not excluded
-            self.tree.item(iid, tags=("excluded",) if excluded else ())
+            included = self.description_overrides.get(row["description"], not row["auto_exclude"])
+            row["include"] = included
+            self.tree.item(iid, tags=() if included else ("excluded",))
 
     def log(self, message):
         tag = "warn" if message.startswith("⚠") else "success"
@@ -1584,8 +1505,8 @@ class SketchExtractorApp:
         self.current_rows = []
         self.current_kind = None
         self.description_overrides = {}
-        if self._exclusion_dialog is not None and self._exclusion_dialog.winfo_exists():
-            self._exclusion_dialog.destroy()
+        if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
+            self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
         self.type_var.set("")
         self.type_combo.configure(state="disabled")
@@ -1652,8 +1573,8 @@ class SketchExtractorApp:
         self.current_rows = []
         self.current_kind = kind
         self.description_overrides = {}
-        if self._exclusion_dialog is not None and self._exclusion_dialog.winfo_exists():
-            self._exclusion_dialog.destroy()
+        if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
+            self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
 
         self.log_text.configure(state="normal")
@@ -1718,7 +1639,7 @@ class SketchExtractorApp:
                 # разным материалом (например "Стенка задняя" из ЛДСП 16 и
                 # "Стенка задняя" из ХДФ 3мм в одном заказе) не совпадает
                 # состояние исключения, пока пользователь сам не сгруппирует
-                # их вручную через "Исключения" (см. description_overrides).
+                # их вручную через "Что копировать" (см. description_overrides).
                 "auto_exclude": auto_exclude,
                 "include": not auto_exclude,
             }
@@ -1752,19 +1673,18 @@ class SketchExtractorApp:
         if not row_values:
             self.show_message(
                 "Нечего копировать",
-                'Все строки исключены из копирования — снимите отметки в "Исключениях".',
+                'Не отмечено ни одного вида деталей — отметьте нужные в "Что копировать".',
             )
             return
 
+        # Только обычный текст, без HTML-формата буфера: Excel при вставке по
+        # HTML навязывает своё оформление ячейкам назначения (сбрасывает формат
+        # на "общий", своё выравнивание, убирает рамки), а у пользователя вся
+        # таблица уже размечена как надо. Обычный текст же вставляется прямо в
+        # формат столбца назначения, ничего не трогая.
         text = "\n".join("\t".join(values) for values in row_values)
-        ok, error = copy_rows_to_excel_clipboard(self.root, text, row_values)
-        if not ok:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.log(
-                f"⚠ Шрифт Calibri Light не применился "
-                f"(скопировано обычным текстом): {error}."
-            )
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
         self.log(f"Строк скопировано: {len(row_values)}")
         self.status_var.set(f"Скопировано в буфер: {len(row_values)} строк")
         self.flash_copy_button()
