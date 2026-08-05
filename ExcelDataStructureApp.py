@@ -23,18 +23,20 @@
      (штрихкод-текст вида *ORD######* и ICN######, либо несколько
      номеров через "num;num;num" на одном листе) — читается через
      pdfplumber, без OCR.
-     Тип для столбца F определяется по имени файла:
+     Источник определяется по имени файла:
        - имя содержит "корпус"  -> "inSight"
-       - имя содержит "прочее"  -> "inSight (4 уч.)"
+       - имя содержит "прочее"  -> "inSight (Базис)"
      Если по имени не удалось определить — по умолчанию ставится
-     "inSight" с предупреждением в журнале; тип всегда можно поменять
-     вручную в выпадающем списке наверху, изменение применится сразу
-     ко всем строкам.
+     "inSight" с предупреждением в журнале; источник всегда можно
+     поменять вручную в выпадающем списке наверху, изменение применится
+     сразу ко всем строкам.
 
 Как запустить:
     pip install pdfplumber customtkinter
     (опционально, для drag-and-drop) pip install tkinterdnd2
     (опционально, для кнопки-календаря у поля даты) pip install tkcalendar
+    (опционально, для копирования в Excel шрифтом Calibri Light —
+     только Windows) pip install pywin32
     python ExcelDataStructureApp.py
 """
 
@@ -70,6 +72,12 @@ try:
 except ImportError:
     HAS_TKCALENDAR = False
 
+try:
+    import win32clipboard
+    HAS_WIN32CLIPBOARD = True
+except ImportError:
+    HAS_WIN32CLIPBOARD = False
+
 VK_C = 67
 VK_V = 86
 VK_X = 88
@@ -79,7 +87,9 @@ SOURCE_TYPES = ("Bazis", "inSight", "inSight (Базис)")
 
 # Основной станок пользователя — большинство деталей идёт на него.
 MACHINE_NAME = "Rover C9"
-MACHINE_OPTIONS = (MACHINE_NAME, "B1650", "-")
+
+# "Есть"/"Нет" — столбец "Обработка", кликом по ячейке в таблице.
+PROCESSING_OPTIONS = ("Есть", "Нет")
 
 # "Есть"/"Нет"/"-" — кромка проставляется вручную (программа не умеет
 # определить её по эскизу), кликом по ячейке столбца "Кромка" в таблице.
@@ -198,6 +208,74 @@ def fix_clipboard_shortcuts(widget):
         return None
 
     widget.bind("<Control-KeyPress>", handler)
+
+
+# ---------------------------------------------------------------------------
+# Копирование в буфер шрифтом Calibri Light 12 обычным начертанием — Excel
+# при вставке ориентируется на формат буфера CF_HTML (если он есть), а не на
+# обычный текст, поэтому просто положить текст в буфер (как раньше) для
+# управления шрифтом недостаточно. Работает только на Windows с pywin32
+# (HAS_WIN32CLIPBOARD) — на остальных платформах используется обычный
+# текстовый буфер без явного шрифта (см. copy_rows_to_excel_clipboard).
+# ---------------------------------------------------------------------------
+
+EXCEL_CELL_FONT_CSS = "font-family:'Calibri Light'; font-size:12pt; font-weight:normal; font-style:normal;"
+
+
+def _html_escape(value):
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _build_cf_html(row_values):
+    """Собирает байты формата буфера обмена CF_HTML (см. спецификацию
+    Microsoft "HTML Clipboard Format") — заголовок со смещениями (в байтах
+    UTF-8 от начала всей строки, включая сам заголовок) до начала/конца
+    HTML и до начала/конца самого фрагмента."""
+    fragment = "<table>" + "".join(
+        "<tr>" + "".join(f'<td style="{EXCEL_CELL_FONT_CSS}">{_html_escape(v)}</td>' for v in row) + "</tr>"
+        for row in row_values
+    ) + "</table>"
+    prefix = "<html><body><!--StartFragment-->"
+    suffix = "<!--EndFragment--></body></html>"
+    header_template = (
+        "Version:0.9\r\n"
+        "StartHTML:{start_html:08d}\r\n"
+        "EndHTML:{end_html:08d}\r\n"
+        "StartFragment:{start_fragment:08d}\r\n"
+        "EndFragment:{end_fragment:08d}\r\n"
+    )
+    header_len = len(header_template.format(start_html=0, end_html=0, start_fragment=0, end_fragment=0).encode("utf-8"))
+    start_html = header_len
+    start_fragment = start_html + len(prefix.encode("utf-8"))
+    end_fragment = start_fragment + len(fragment.encode("utf-8"))
+    end_html = end_fragment + len(suffix.encode("utf-8"))
+    header = header_template.format(
+        start_html=start_html, end_html=end_html,
+        start_fragment=start_fragment, end_fragment=end_fragment,
+    )
+    return (header + prefix + fragment + suffix).encode("utf-8")
+
+
+def copy_rows_to_excel_clipboard(root, text, row_values):
+    """Кладёт в буфер и обычный текст, и CF_HTML с явным шрифтом Calibri
+    Light 12 — Excel при вставке использует именно HTML-формат буфера, если
+    он есть. Возвращает True, если удалось (Windows + установлен pywin32);
+    иначе False — тогда вызывающий код сам копирует обычным текстом через
+    tkinter, как раньше."""
+    if not HAS_WIN32CLIPBOARD:
+        return False
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
+            cf_html = win32clipboard.RegisterClipboardFormat("HTML Format")
+            win32clipboard.SetClipboardData(cf_html, _build_cf_html(row_values))
+        finally:
+            win32clipboard.CloseClipboard()
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +620,6 @@ def parse_bln_sketches(bln_path):
             description = desc_m.group(1).strip()
 
         is_excluded_name = is_excluded_part_name(description)
-        excluded_name_reason = description if is_excluded_name else None
 
         if is_assembly:
             n_assembly += 1
@@ -558,17 +635,6 @@ def parse_bln_sketches(bln_path):
                 description = os.path.splitext(fname)[0]
         elif is_too_thin or is_excluded_name or is_glass:
             n_not_machinable += 1
-
-        exclude_reasons = []
-        if is_assembly:
-            exclude_reasons.append("СБ")
-        if is_glass:
-            exclude_reasons.append("Стекло")
-        if is_too_thin:
-            exclude_reasons.append(f"{thickness_mm}мм")
-        if excluded_name_reason:
-            exclude_reasons.append(excluded_name_reason)
-        exclude_reason = ", ".join(exclude_reasons)
 
         if not part_codes:
             warnings.append(f'Не удалось определить код детали для "{fname}" — пропущено.')
@@ -594,19 +660,18 @@ def parse_bln_sketches(bln_path):
                 "raw_name": fname,
                 "is_assembly": is_assembly,
                 "auto_exclude": is_assembly or is_too_thin or is_excluded_name or is_glass,
-                "exclude_reason": exclude_reason,
             })
 
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f'{n_not_machinable} — показаны в таблице со столбцом "Станок" = "-".'
+            f'{n_not_machinable} — показаны в таблице со столбцом "Обработка" = "Нет".'
         )
 
     if n_assembly:
         warnings.append(
             f'Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице со столбцом '
-            f'"Станок" = "-".'
+            f'"Обработка" = "Нет".'
         )
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
@@ -645,12 +710,16 @@ MULTI_PART_RE = re.compile(r"\b(\d{6,9}(?:\s*;\s*\d{6,9})+)\b")
 # Маркировка стандартной готовой заготовки рядом со штрихкодом на эскизе,
 # например "R061" — скрытый штрихкод-текст вида *R061*, по аналогии с
 # *ORD######*. На такие детали программу не пишут — как сборочные чертежи
-# и материалы 3мм, идут со столбцом "Станок" = "-".
-STANDARD_BLANK_RE = re.compile(r"\*R\d+\*")
+# и материалы 3мм, идут со столбцом "Обработка" = "Нет". Сам код (например
+# "R061") записывается в столбец "Заготовка", а в "Дата готовности"
+# автоматически пишется "Стандарт" — единственное исключение из правила
+# "программа никогда не пишет в Дата готовности" (см. "Что копируется").
+STANDARD_BLANK_RE = re.compile(r"\*(R\d+)\*")
 
 
-def is_standard_blank(text):
-    return bool(STANDARD_BLANK_RE.search(text))
+def extract_standard_blank_code(text):
+    m = STANDARD_BLANK_RE.search(text)
+    return m.group(1) if m else None
 
 # Материал с толщиной в тексте PDF, например:
 # "0 ЭР35521 ЛДСП 16 Кашемир U702 СТ9 2800х2070 ..." -> "ЛДСП 16 Кашемир U702 СТ9"
@@ -769,25 +838,13 @@ def parse_pdf_sketches(pdf_path):
             thickness_mm = material_thickness_mm(material)
             is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
             is_excluded_name = is_excluded_part_name(part_name)
-            is_blank = is_standard_blank(text)
+            blank_code = extract_standard_blank_code(text)
+            is_blank = bool(blank_code)
             is_bad_diagonal = is_unmachinable_diagonal_cut(text)
             is_glass = is_glass_material(material)
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
-
-            exclude_reasons = []
-            if is_glass:
-                exclude_reasons.append("Стекло")
-            if is_too_thin:
-                exclude_reasons.append(f"{thickness_mm}мм")
-            if is_excluded_name:
-                exclude_reasons.append(part_name)
-            if is_blank:
-                exclude_reasons.append("Стандартная заготовка")
-            if is_bad_diagonal:
-                exclude_reasons.append("Срез 45°")
-            exclude_reason = ", ".join(exclude_reasons)
 
             results.append({
                 "order_from_content": order,
@@ -795,10 +852,10 @@ def parse_pdf_sketches(pdf_path):
                 "description": part_name or "",
                 "material": material,
                 "extra_sketch": extra_sketch,
+                "standard_blank_code": blank_code,
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
                 "auto_exclude": is_too_thin or is_excluded_name or is_blank or is_bad_diagonal or is_glass,
-                "exclude_reason": exclude_reason,
             })
 
     if order_votes:
@@ -817,7 +874,7 @@ def parse_pdf_sketches(pdf_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f'{n_not_machinable} — показаны в таблице со столбцом "Станок" = "-".'
+            f'{n_not_machinable} — показаны в таблице со столбцом "Обработка" = "Нет".'
         )
 
     if not results:
@@ -1028,8 +1085,8 @@ class SketchExtractorApp:
         self._reg(tree_frame, "card", surface="bg")
 
         columns = (
-            "date", "order", "part", "description", "material",
-            "type", "extra_sketch", "machine", "edge", "note",
+            "date", "order", "part", "extra_sketch", "description", "material",
+            "processing", "type", "blank_code", "ready_date", "edge",
         )
         self.columns = columns
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
@@ -1037,18 +1094,19 @@ class SketchExtractorApp:
             "date": "Дата запуска",
             "order": "№ заказа",
             "part": "№ детали",
+            "extra_sketch": "Доп. эскиз",
             "description": "Описание",
             "material": "Материал",
+            "processing": "Обработка",
             "type": "Источник",
-            "extra_sketch": "Доп. эскиз",
-            "machine": "Станок",
+            "blank_code": "Заготовка",
+            "ready_date": "Дата готовности",
             "edge": "Кромка",
-            "note": "Примечание",
         }
         widths = {
-            "date": 90, "order": 80, "part": 100,
-            "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
-            "machine": 100, "edge": 60, "note": 150,
+            "date": 90, "order": 80, "part": 100, "extra_sketch": 150,
+            "description": 220, "material": 260, "processing": 90, "type": 100,
+            "blank_code": 90, "ready_date": 110, "edge": 60,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1301,8 +1359,8 @@ class SketchExtractorApp:
         if col_index < 0 or col_index >= len(self.columns):
             return
         col_name = self.columns[col_index]
-        if col_name == "machine":
-            self._show_cell_dropdown(event, iid, "machine", MACHINE_OPTIONS)
+        if col_name == "processing":
+            self._show_cell_dropdown(event, iid, "processing", PROCESSING_OPTIONS)
         elif col_name == "edge":
             self._show_cell_dropdown(event, iid, "edge", EDGE_OPTIONS)
 
@@ -1509,6 +1567,7 @@ class SketchExtractorApp:
             part_for_row = item["part_code"] or missing_marker
             is_assembly = item.get("is_assembly", False)
             auto_exclude = item.get("auto_exclude", is_assembly)
+            blank_code = item.get("standard_blank_code")
             row = {
                 "date": current_date,
                 "order": order_for_row,
@@ -1517,14 +1576,18 @@ class SketchExtractorApp:
                 "edge": "-",  # кромка — только руками, по эскизу, кликом в таблице
                 "material": item.get("material") or "",
                 "description": item["description"],
-                "extra_sketch": item.get("extra_sketch") or "-",
-                "machine": "-" if auto_exclude else MACHINE_NAME,
-                "note": item.get("exclude_reason") or "",
+                "extra_sketch": item.get("extra_sketch") or "Нет",
+                "processing": "Нет" if auto_exclude else "Есть",
+                "blank_code": blank_code or "-",
+                # "Стандарт" — единственное исключение из правила "программа
+                # никогда не пишет в Дата готовности": для стандартных
+                # заготовок и так понятно, что готовы, программу не пишем.
+                "ready_date": "Стандарт" if blank_code else "",
             }
             self.tree.insert("", tk.END, values=(
-                row["date"], row["order"], row["part"],
-                row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["machine"], row["edge"], row["note"],
+                row["date"], row["order"], row["part"], row["extra_sketch"],
+                row["description"], row["material"], row["processing"], row["type"],
+                row["blank_code"], row["ready_date"], row["edge"],
             ))
             self.current_rows.append(row)
 
@@ -1536,21 +1599,23 @@ class SketchExtractorApp:
             self.show_message("Нечего копировать", "Сначала разберите файл.")
             return
         date_start = self.date_var.get().strip()
-        lines = []
+        row_values = []
         for row in self.current_rows:
-            # B=дата запуска, C=заказ, D=деталь, E=описание, F=материал,
-            # G=источник, H=доп. эскиз, I=станок, J=кромка, K=(дата
-            # готовности — вручную позже), L=примечание.
-            lines.append("\t".join([
-                date_start, row["order"], row["part"], row["description"], row["material"],
-                row["type"], row["extra_sketch"], row["machine"], row["edge"], "", row["note"],
-            ]))
+            # B=дата запуска, C=заказ, D=деталь, E=доп. эскиз, F=описание,
+            # G=материал, H=обработка, I=источник, J=заготовка, K=дата
+            # готовности, L=кромка.
+            row_values.append([
+                date_start, row["order"], row["part"], row["extra_sketch"],
+                row["description"], row["material"], row["processing"], row["type"],
+                row["blank_code"], row["ready_date"], row["edge"],
+            ])
 
-        text = "\n".join(lines)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.log(f"Строк скопировано: {len(lines)}")
-        self.status_var.set(f"Скопировано в буфер: {len(lines)} строк")
+        text = "\n".join("\t".join(values) for values in row_values)
+        if not copy_rows_to_excel_clipboard(self.root, text, row_values):
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        self.log(f"Строк скопировано: {len(row_values)}")
+        self.status_var.set(f"Скопировано в буфер: {len(row_values)} строк")
         self.flash_copy_button()
 
     def flash_copy_button(self):
