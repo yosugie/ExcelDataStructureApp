@@ -88,9 +88,6 @@ SOURCE_TYPES = ("Bazis", "inSight", "inSight (Базис)")
 # Основной станок пользователя — большинство деталей идёт на него.
 MACHINE_NAME = "Rover C9"
 
-# "Есть"/"Нет" — столбец "Обработка", кликом по ячейке в таблице.
-PROCESSING_OPTIONS = ("Есть", "Нет")
-
 # "Есть"/"Нет"/"-" — кромка проставляется вручную (программа не умеет
 # определить её по эскизу), кликом по ячейке столбца "Кромка" в таблице.
 EDGE_OPTIONS = ("Есть", "Нет", "-")
@@ -665,13 +662,12 @@ def parse_bln_sketches(bln_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f'{n_not_machinable} — показаны в таблице со столбцом "Обработка" = "Нет".'
+            f"{n_not_machinable} — показаны в таблице для проверки."
         )
 
     if n_assembly:
         warnings.append(
-            f'Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице со столбцом '
-            f'"Обработка" = "Нет".'
+            f"Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице для проверки."
         )
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
@@ -709,11 +705,10 @@ MULTI_PART_RE = re.compile(r"\b(\d{6,9}(?:\s*;\s*\d{6,9})+)\b")
 
 # Маркировка стандартной готовой заготовки рядом со штрихкодом на эскизе,
 # например "R061" — скрытый штрихкод-текст вида *R061*, по аналогии с
-# *ORD######*. На такие детали программу не пишут — как сборочные чертежи
-# и материалы 3мм, идут со столбцом "Обработка" = "Нет". Сам код (например
-# "R061") записывается в столбец "Заготовка", а в "Дата готовности"
-# автоматически пишется "Стандарт" — единственное исключение из правила
-# "программа никогда не пишет в Дата готовности" (см. "Что копируется").
+# *ORD######*. На такие детали программу не пишут. Сам код (например
+# "R061") пишется в столбец "Дата готовности" вместо даты — единственное
+# исключение из правила "программа никогда не пишет в Дата готовности"
+# (см. "Что копируется").
 STANDARD_BLANK_RE = re.compile(r"\*(R\d+)\*")
 
 
@@ -874,7 +869,7 @@ def parse_pdf_sketches(pdf_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f'{n_not_machinable} — показаны в таблице со столбцом "Обработка" = "Нет".'
+            f"{n_not_machinable} — показаны в таблице для проверки."
         )
 
     if not results:
@@ -1085,8 +1080,8 @@ class SketchExtractorApp:
         self._reg(tree_frame, "card", surface="bg")
 
         columns = (
-            "date", "order", "part", "extra_sketch", "description", "material",
-            "processing", "type", "blank_code", "ready_date", "edge",
+            "date", "order", "part", "description", "material",
+            "type", "extra_sketch", "ready_date", "edge",
         )
         self.columns = columns
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
@@ -1094,19 +1089,17 @@ class SketchExtractorApp:
             "date": "Дата запуска",
             "order": "№ заказа",
             "part": "№ детали",
-            "extra_sketch": "Доп. эскиз",
             "description": "Описание",
             "material": "Материал",
-            "processing": "Обработка",
             "type": "Источник",
-            "blank_code": "Заготовка",
+            "extra_sketch": "Доп. эскиз",
             "ready_date": "Дата готовности",
             "edge": "Кромка",
         }
         widths = {
-            "date": 90, "order": 80, "part": 100, "extra_sketch": 150,
-            "description": 220, "material": 260, "processing": 90, "type": 100,
-            "blank_code": 90, "ready_date": 110, "edge": 60,
+            "date": 90, "order": 80, "part": 100,
+            "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
+            "ready_date": 110, "edge": 60,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1359,9 +1352,7 @@ class SketchExtractorApp:
         if col_index < 0 or col_index >= len(self.columns):
             return
         col_name = self.columns[col_index]
-        if col_name == "processing":
-            self._show_cell_dropdown(event, iid, "processing", PROCESSING_OPTIONS)
-        elif col_name == "edge":
+        if col_name == "edge":
             self._show_cell_dropdown(event, iid, "edge", EDGE_OPTIONS)
 
     def _show_cell_dropdown(self, event, iid, row_key, options):
@@ -1565,8 +1556,6 @@ class SketchExtractorApp:
         for item in results:
             order_for_row = item["order_from_content"] or order_number or missing_marker
             part_for_row = item["part_code"] or missing_marker
-            is_assembly = item.get("is_assembly", False)
-            auto_exclude = item.get("auto_exclude", is_assembly)
             blank_code = item.get("standard_blank_code")
             row = {
                 "date": current_date,
@@ -1577,17 +1566,16 @@ class SketchExtractorApp:
                 "material": item.get("material") or "",
                 "description": item["description"],
                 "extra_sketch": item.get("extra_sketch") or "Нет",
-                "processing": "Нет" if auto_exclude else "Есть",
-                "blank_code": blank_code or "-",
-                # "Стандарт" — единственное исключение из правила "программа
-                # никогда не пишет в Дата готовности": для стандартных
-                # заготовок и так понятно, что готовы, программу не пишем.
-                "ready_date": "Стандарт" if blank_code else "",
+                # Код стандартной заготовки (например "R061") вместо даты —
+                # единственное исключение из правила "программа никогда не
+                # пишет в Дата готовности", иначе всегда пусто (заполняется
+                # пользователем в Excel по мере выполнения заказа).
+                "ready_date": blank_code or "",
             }
             self.tree.insert("", tk.END, values=(
-                row["date"], row["order"], row["part"], row["extra_sketch"],
-                row["description"], row["material"], row["processing"], row["type"],
-                row["blank_code"], row["ready_date"], row["edge"],
+                row["date"], row["order"], row["part"],
+                row["description"], row["material"], row["type"], row["extra_sketch"],
+                row["ready_date"], row["edge"],
             ))
             self.current_rows.append(row)
 
@@ -1601,13 +1589,12 @@ class SketchExtractorApp:
         date_start = self.date_var.get().strip()
         row_values = []
         for row in self.current_rows:
-            # B=дата запуска, C=заказ, D=деталь, E=доп. эскиз, F=описание,
-            # G=материал, H=обработка, I=источник, J=заготовка, K=дата
-            # готовности, L=кромка.
+            # B=дата запуска, C=заказ, D=деталь, E=описание, F=материал,
+            # G=источник, H=доп. эскиз, I=дата готовности, J=кромка.
             row_values.append([
-                date_start, row["order"], row["part"], row["extra_sketch"],
-                row["description"], row["material"], row["processing"], row["type"],
-                row["blank_code"], row["ready_date"], row["edge"],
+                date_start, row["order"], row["part"],
+                row["description"], row["material"], row["type"], row["extra_sketch"],
+                row["ready_date"], row["edge"],
             ])
 
         text = "\n".join("\t".join(values) for values in row_values)
