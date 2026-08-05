@@ -261,12 +261,14 @@ def _build_cf_html(row_values):
 
 def copy_rows_to_excel_clipboard(root, text, row_values):
     """Кладёт в буфер и обычный текст, и CF_HTML с явным шрифтом Calibri
-    Light 12 — Excel при вставке использует именно HTML-формат буфера, если
-    он есть. Возвращает True, если удалось (Windows + установлен pywin32);
-    иначе False — тогда вызывающий код сам копирует обычным текстом через
-    tkinter, как раньше."""
+    Light 12 и заливкой первой строки — Excel при вставке использует именно
+    HTML-формат буфера, если он есть. Возвращает (True, None), если удалось
+    (Windows + установлен pywin32); иначе (False, причина) — тогда
+    вызывающий код сам копирует обычным текстом через tkinter, как раньше,
+    а причину стоит показать в журнале, чтобы не гадать вслепую, почему
+    шрифт/заливка не применились."""
     if not HAS_WIN32CLIPBOARD:
-        return False
+        return False, 'модуль "pywin32" не установлен'
     try:
         win32clipboard.OpenClipboard()
         try:
@@ -276,9 +278,9 @@ def copy_rows_to_excel_clipboard(root, text, row_values):
             win32clipboard.SetClipboardData(cf_html, _build_cf_html(row_values))
         finally:
             win32clipboard.CloseClipboard()
-        return True
-    except Exception:
-        return False
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -841,8 +843,10 @@ def parse_pdf_sketches(pdf_path):
             thickness_mm = material_thickness_mm(material)
             is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
             is_excluded_name = is_excluded_part_name(part_name)
+            # Код стандартной заготовки (например "R061") только записывается
+            # в "Дата готовности" (см. GUI) — сам по себе не исключает деталь
+            # из копирования, такие детали тоже нужно копировать.
             blank_code = extract_standard_blank_code(text)
-            is_blank = bool(blank_code)
             is_bad_diagonal = is_unmachinable_diagonal_cut(text)
             is_glass = is_glass_material(material)
 
@@ -858,7 +862,7 @@ def parse_pdf_sketches(pdf_path):
                 "standard_blank_code": blank_code,
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
-                "auto_exclude": is_too_thin or is_excluded_name or is_blank or is_bad_diagonal or is_glass,
+                "auto_exclude": is_too_thin or is_excluded_name or is_bad_diagonal or is_glass,
             })
 
     if order_votes:
@@ -1758,9 +1762,14 @@ class SketchExtractorApp:
             return
 
         text = "\n".join("\t".join(values) for values in row_values)
-        if not copy_rows_to_excel_clipboard(self.root, text, row_values):
+        ok, error = copy_rows_to_excel_clipboard(self.root, text, row_values)
+        if not ok:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
+            self.log(
+                f"⚠ Шрифт Calibri Light и заливка первой строки не применились "
+                f"(скопировано обычным текстом): {error}."
+            )
         self.log(f"Строк скопировано: {len(row_values)}")
         self.status_var.set(f"Скопировано в буфер: {len(row_values)} строк")
         self.flash_copy_button()
