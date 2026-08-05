@@ -662,12 +662,14 @@ def parse_bln_sketches(bln_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable} — показаны в таблице для проверки."
+            f"{n_not_machinable} — показаны в таблице серым, копирование по умолчанию "
+            f'исключено (можно поправить в "Исключениях").'
         )
 
     if n_assembly:
         warnings.append(
-            f"Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице для проверки."
+            f"Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице серым, "
+            f'копирование по умолчанию исключено (можно поправить в "Исключениях").'
         )
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
@@ -869,7 +871,8 @@ def parse_pdf_sketches(pdf_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable} — показаны в таблице для проверки."
+            f"{n_not_machinable} — показаны в таблице серым, копирование по умолчанию "
+            f'исключено (можно поправить в "Исключениях").'
         )
 
     if not results:
@@ -956,6 +959,69 @@ class MessageDialog(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
         self.grab_set()
         self.wait_window()
+
+
+class ExclusionDialog(ctk.CTkToplevel):
+    """Список всех видов деталей (по столбцу "Описание"), найденных при
+    последнем разборе файла — с галочками. По умолчанию отмечены (и
+    вынесены наверх списка) те виды, что программа сама исключает из
+    копирования (сборка/стекло/3мм и т.п.), но пользователь может
+    отметить/снять отметку с любого вида вручную — все строки этого вида
+    сразу красятся серым в таблице и перестают копироваться в буфер (или
+    наоборот, если снять отметку с автоматического исключения)."""
+
+    def __init__(self, master, colors, icon_images, theme, counts, checked_state, on_toggle):
+        super().__init__(master)
+        self.title("Исключения из копирования")
+        self.resizable(False, False)
+        self.configure(fg_color=colors["bg"])
+        self.transient(master)
+        _apply_window_icon(self, icon_images, theme)
+        set_windows_dark_titlebar(self, dark=(theme == "dark"))
+
+        content = ctk.CTkFrame(
+            self, fg_color=colors["card"], corner_radius=16,
+            border_width=1, border_color=colors["border"],
+        )
+        content.grid(row=0, column=0, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            content, text="Отметьте виды деталей, которые не нужно копировать в буфер:",
+            text_color=colors["text"], wraplength=360, justify="left",
+        ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
+
+        scroll = ctk.CTkScrollableFrame(
+            content, width=360, height=320, corner_radius=12,
+            fg_color=colors["input"], scrollbar_button_color=colors["border"],
+            scrollbar_button_hover_color=colors["muted"],
+        )
+        scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
+
+        items = sorted(
+            counts.items(),
+            key=lambda pair: (not checked_state.get(pair[0], False), (pair[0] or "").lower()),
+        )
+        for description, count in items:
+            label = f"{description or '(без названия)'} ({count})"
+            var = tk.BooleanVar(value=checked_state.get(description, False))
+            ctk.CTkCheckBox(
+                scroll, text=label, variable=var,
+                text_color=colors["text"], fg_color=colors["accent"],
+                hover_color=colors["accent_hover"], border_color=colors["border"],
+                command=lambda d=description, v=var: on_toggle(d, v.get()),
+            ).pack(anchor="w", pady=4, padx=4)
+
+        ctk.CTkButton(
+            content, text="Готово", command=self.destroy, width=110, height=32,
+            corner_radius=20, fg_color=colors["accent"],
+            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
+        ).grid(row=2, column=0, pady=(0, 20))
+
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
 
 
 class SketchExtractorApp:
@@ -1066,6 +1132,13 @@ class SketchExtractorApp:
         )
         self.today_btn.pack(side="left")
         self._reg(self.today_btn, "secondary_button")
+
+        self.exclusions_btn = ctk.CTkButton(
+            date_row, text="Исключения", command=self.open_exclusions_dialog,
+            height=32, width=120, corner_radius=20,
+        )
+        self.exclusions_btn.pack(side="right")
+        self._reg(self.exclusions_btn, "secondary_button")
 
         # --- Статус-строка ---
         self.status_var = tk.StringVar(value="")
@@ -1217,6 +1290,10 @@ class SketchExtractorApp:
 
         self.current_rows = []  # список dict-ов с результатами разбора
         self.current_kind = None  # "bazis" или "pdf"
+        # Ручные переопределения из диалога "Исключения": {"Описание": bool}.
+        # Есть запись — воля пользователя побеждает; нет — используется
+        # "auto_exclude" конкретной строки (см. _apply_row_styling).
+        self.description_overrides = {}
 
         self.apply_theme()
 
@@ -1308,6 +1385,7 @@ class SketchExtractorApp:
         style.map("Treeview", background=[("selected", t["accent"])], foreground=[("selected", t["accent_text"])])
         style.configure("Treeview.Heading", background=t["bg"], foreground=t["text"], relief="flat")
         style.map("Treeview.Heading", background=[("active", t["bg"])])
+        self.tree.tag_configure("excluded", background=t["input"], foreground=t["muted"])
 
     def _set_empty_state(self, show):
         if show:
@@ -1317,6 +1395,40 @@ class SketchExtractorApp:
 
     def show_message(self, title, message):
         MessageDialog(self.root, THEMES[self.theme], self._icon_imgs, self.theme, title, message)
+
+    def open_exclusions_dialog(self):
+        if not self.current_rows:
+            self.show_message("Нечего показывать", "Сначала разберите файл.")
+            return
+        counts = {}
+        any_auto_excluded = {}
+        for row in self.current_rows:
+            d = row["description"]
+            counts[d] = counts.get(d, 0) + 1
+            any_auto_excluded[d] = any_auto_excluded.get(d, False) or row["auto_exclude"]
+        # Показываем галочку по умолчанию, если хоть одна строка этого вида
+        # программа сама исключила (или явно выбрано вручную ранее) — но
+        # пока пользователь не кликнет по галочке сам, это только для
+        # наглядности в диалоге и не трогает состояние отдельных строк
+        # (см. _apply_row_styling — там в силе остаётся "auto_exclude"
+        # каждой строки, если явного выбора для этого вида ещё не было).
+        checked_state = {
+            d: self.description_overrides.get(d, any_auto_excluded[d]) for d in counts
+        }
+        ExclusionDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            counts, checked_state, self.toggle_description_exclusion,
+        )
+
+    def toggle_description_exclusion(self, description, is_excluded):
+        self.description_overrides[description] = is_excluded
+        self._apply_row_styling()
+
+    def _apply_row_styling(self):
+        for iid, row in zip(self.tree.get_children(), self.current_rows):
+            excluded = self.description_overrides.get(row["description"], row["auto_exclude"])
+            row["include"] = not excluded
+            self.tree.item(iid, tags=("excluded",) if excluded else ())
 
     def log(self, message):
         tag = "warn" if message.startswith("⚠") else "success"
@@ -1447,6 +1559,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = None
+        self.description_overrides = {}
         self._set_empty_state(False)
         self.type_var.set("")
         self.type_combo.configure(state="disabled")
@@ -1512,6 +1625,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = kind
+        self.description_overrides = {}
         self._set_empty_state(False)
 
         self.log_text.configure(state="normal")
@@ -1557,6 +1671,7 @@ class SketchExtractorApp:
             order_for_row = item["order_from_content"] or order_number or missing_marker
             part_for_row = item["part_code"] or missing_marker
             blank_code = item.get("standard_blank_code")
+            auto_exclude = bool(item.get("auto_exclude"))
             row = {
                 "date": current_date,
                 "order": order_for_row,
@@ -1571,12 +1686,20 @@ class SketchExtractorApp:
                 # пишет в Дата готовности", иначе всегда пусто (заполняется
                 # пользователем в Excel по мере выполнения заказа).
                 "ready_date": blank_code or "",
+                # Своё "auto_exclude" на КАЖДОЙ строке (а не на весь вид
+                # детали разом) — так у двух одинаково названных деталей с
+                # разным материалом (например "Стенка задняя" из ЛДСП 16 и
+                # "Стенка задняя" из ХДФ 3мм в одном заказе) не совпадает
+                # состояние исключения, пока пользователь сам не сгруппирует
+                # их вручную через "Исключения" (см. description_overrides).
+                "auto_exclude": auto_exclude,
+                "include": not auto_exclude,
             }
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
                 row["ready_date"], row["edge"],
-            ))
+            ), tags=("excluded",) if auto_exclude else ())
             self.current_rows.append(row)
 
         self._set_empty_state(not results)
@@ -1589,6 +1712,8 @@ class SketchExtractorApp:
         date_start = self.date_var.get().strip()
         row_values = []
         for row in self.current_rows:
+            if not row["include"]:
+                continue
             # B=дата запуска, C=заказ, D=деталь, E=описание, F=материал,
             # G=источник, H=доп. эскиз, I=дата готовности, J=кромка.
             row_values.append([
@@ -1596,6 +1721,13 @@ class SketchExtractorApp:
                 row["description"], row["material"], row["type"], row["extra_sketch"],
                 row["ready_date"], row["edge"],
             ])
+
+        if not row_values:
+            self.show_message(
+                "Нечего копировать",
+                'Все строки исключены из копирования — снимите отметки в "Исключениях".',
+            )
+            return
 
         text = "\n".join("\t".join(values) for values in row_values)
         if not copy_rows_to_excel_clipboard(self.root, text, row_values):
