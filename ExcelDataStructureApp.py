@@ -344,26 +344,56 @@ ASSEMBLY_CODE_IN_STREAM_RE = re.compile(rb"(\d{5,7})\s+(\d{2})\s+\xd0\xa1\xd0\x9
 # "ЛДСП 16 Белый премиум W1000 ST9 (Артикул ЭР00442)"
 MATERIAL_MARKER = "Артикул".encode("utf-8")
 
+# Запасной способ найти строку материала, если рядом нет слова "Артикул" —
+# так бывает у алюминиевого профиля (у него в бинарнике вообще нет этого
+# поля). Ищем среди всех похожих на текст строк ту, что начинается с одной
+# из известных категорий материала — список минимальный, по мере
+# обнаружения новых случаев легко расширить.
+MATERIAL_CATEGORY_WORDS = ("ЛДСП", "МДФ", "ХДФ", "Стекло", "Алюминиевый", "Фасад")
 
-def extract_material(stream):
-    """Ищет строку материала в бинарных данных чертежа (см. MATERIAL_MARKER)."""
-    idx = stream.find(MATERIAL_MARKER)
-    if idx == -1:
-        return None
-    lowest_start = max(0, idx - 4 - 300)
-    for start in range(idx - 4, lowest_start - 1, -1):
+
+def _iter_length_prefixed_strings(stream):
+    """Перебирает участки бинарных данных вида "4-байтовое число (длина) +
+    печатаемый UTF-8 текст такой длины" — тем же способом, каким кодируются
+    строки материала/названий в чертежах Базис."""
+    for start in range(0, len(stream) - 4):
         length = struct.unpack_from("<I", stream, start)[0]
         if not (5 <= length <= 250):
             continue
         end = start + 4 + length
-        if end > len(stream) or end <= idx:
+        if end > len(stream):
             continue
         candidate = stream[start + 4:end]
         try:
             decoded = candidate.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        if "Артикул" in decoded and decoded.isprintable():
+        if decoded.isprintable():
+            yield decoded
+
+
+def extract_material(stream):
+    """Ищет строку материала в бинарных данных чертежа (см. MATERIAL_MARKER)."""
+    idx = stream.find(MATERIAL_MARKER)
+    if idx != -1:
+        lowest_start = max(0, idx - 4 - 300)
+        for start in range(idx - 4, lowest_start - 1, -1):
+            length = struct.unpack_from("<I", stream, start)[0]
+            if not (5 <= length <= 250):
+                continue
+            end = start + 4 + length
+            if end > len(stream) or end <= idx:
+                continue
+            candidate = stream[start + 4:end]
+            try:
+                decoded = candidate.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if "Артикул" in decoded and decoded.isprintable():
+                return decoded
+
+    for decoded in _iter_length_prefixed_strings(stream):
+        if decoded.startswith(MATERIAL_CATEGORY_WORDS):
             return decoded
     return None
 
