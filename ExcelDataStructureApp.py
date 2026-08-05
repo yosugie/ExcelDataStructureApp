@@ -83,7 +83,7 @@ VK_V = 86
 VK_X = 88
 VK_A = 65
 
-SOURCE_TYPES = ("Bazis", "inSight", "inSight (Базис)")
+SOURCE_TYPES = ("Базис", "inSight", "inSight (Базис)")
 
 # Основной станок пользователя — большинство деталей идёт на него.
 MACHINE_NAME = "Rover C9"
@@ -1656,7 +1656,7 @@ class SketchExtractorApp:
         try:
             if kind == "bazis":
                 order_number, results, warnings = parse_bln_sketches(path)
-                row_type = "Bazis"
+                row_type = "Базис"
                 self.type_var.set(row_type)
                 self.type_combo.configure(state="readonly")
             else:
