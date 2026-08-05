@@ -219,13 +219,6 @@ EXCEL_CELL_FONT_CSS = "font-family:'Calibri Light'; font-size:12pt; font-weight:
 # то, что пользователь уже настроил в самой таблице.
 EXCEL_CELL_BORDER_CSS = "border: 1px solid #000000;"
 
-# Заливка первой скопированной строки — RGB(255, 192, 0), тот же
-# "Оранжевый" из стандартных цветов Excel, которым пользователь вручную
-# красил первую строку каждой новой вставки, чтобы отделять дни/источники
-# друг от друга в общей таблице. Программа теперь красит эту строку сама
-# при каждом копировании.
-FIRST_ROW_HIGHLIGHT_COLOR = "#FFC000"
-
 
 def _html_escape(value):
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -236,16 +229,10 @@ def _build_cf_html(row_values):
     Microsoft "HTML Clipboard Format") — заголовок со смещениями (в байтах
     UTF-8 от начала всей строки, включая сам заголовок) до начала/конца
     HTML и до начала/конца самого фрагмента."""
+    style = f"{EXCEL_CELL_FONT_CSS} {EXCEL_CELL_BORDER_CSS}"
     rows_html = []
-    for i, row in enumerate(row_values):
-        style = f"{EXCEL_CELL_FONT_CSS} {EXCEL_CELL_BORDER_CSS}"
-        if i == 0:
-            style += f" background-color:{FIRST_ROW_HIGHLIGHT_COLOR};"
+    for row in row_values:
         cells = "".join(f'<td style="{style}">{_html_escape(v)}</td>' for v in row)
-        # Один лишний пустой столбец справа — под "Кромку" в самой
-        # Excel-таблице пользователя (программа её не ведёт), чтобы заливка
-        # первой строки доходила и до неё сплошной цветной полосой.
-        cells += f'<td style="{style}"></td>'
         rows_html.append(f"<tr>{cells}</tr>")
     fragment = "<table>" + "".join(rows_html) + "</table>"
     prefix = "<html><body><!--StartFragment-->"
@@ -271,12 +258,11 @@ def _build_cf_html(row_values):
 
 def copy_rows_to_excel_clipboard(root, text, row_values):
     """Кладёт в буфер и обычный текст, и CF_HTML с явным шрифтом Calibri
-    Light 12 и заливкой первой строки — Excel при вставке использует именно
-    HTML-формат буфера, если он есть. Возвращает (True, None), если удалось
-    (Windows + установлен pywin32); иначе (False, причина) — тогда
-    вызывающий код сам копирует обычным текстом через tkinter, как раньше,
-    а причину стоит показать в журнале, чтобы не гадать вслепую, почему
-    шрифт/заливка не применились."""
+    Light 12 — Excel при вставке использует именно HTML-формат буфера, если
+    он есть. Возвращает (True, None), если удалось (Windows + установлен
+    pywin32); иначе (False, причина) — тогда вызывающий код сам копирует
+    обычным текстом через tkinter, как раньше, а причину стоит показать в
+    журнале, чтобы не гадать вслепую, почему шрифт не применился."""
     if not HAS_WIN32CLIPBOARD:
         return False, 'модуль "pywin32" не установлен'
     try:
@@ -1777,7 +1763,7 @@ class SketchExtractorApp:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self.log(
-                f"⚠ Шрифт Calibri Light и заливка первой строки не применились "
+                f"⚠ Шрифт Calibri Light не применился "
                 f"(скопировано обычным текстом): {error}."
             )
         self.log(f"Строк скопировано: {len(row_values)}")
