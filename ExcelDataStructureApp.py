@@ -78,12 +78,12 @@ VK_A = 65
 SOURCE_TYPES = ("Bazis", "inSight", "inSight (Базис)")
 
 # Основной станок пользователя — большинство деталей идёт на него.
-MACHINE_NAME = "Rover C9 Edge"
+MACHINE_NAME = "Rover C9"
 MACHINE_OPTIONS = (MACHINE_NAME, "B1650", "-")
 
-# "Есть"/"Нет" — кромка проставляется вручную (программа не умеет определить
-# её по эскизу), кликом по ячейке столбца "Кромка" в таблице.
-EDGE_OPTIONS = ("Есть", "Нет")
+# "Есть"/"Нет"/"-" — кромка проставляется вручную (программа не умеет
+# определить её по эскизу), кликом по ячейке столбца "Кромка" в таблице.
+EDGE_OPTIONS = ("Есть", "Нет", "-")
 
 # Иконка приложения — плоская пиктограмма-таблица, отдельная под каждую тему
 # (тёмный/светлый фон + акцентный синий каждой темы), 32x32 и 64x64 PNG,
@@ -570,14 +570,13 @@ def parse_bln_sketches(bln_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable} — показаны в таблице для проверки, галочка копирования "
-            f"снята по умолчанию."
+            f'{n_not_machinable} — показаны в таблице со столбцом "Станок" = "-".'
         )
 
     if n_assembly:
         warnings.append(
-            f"Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице для проверки, "
-            f"но не войдут в копирование строк."
+            f'Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице со столбцом '
+            f'"Станок" = "-".'
         )
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
@@ -615,9 +614,8 @@ MULTI_PART_RE = re.compile(r"\b(\d{6,9}(?:\s*;\s*\d{6,9})+)\b")
 
 # Маркировка стандартной готовой заготовки рядом со штрихкодом на эскизе,
 # например "R061" — скрытый штрихкод-текст вида *R061*, по аналогии с
-# *ORD######*. На такие детали программу не пишут и в таблицу их не заносят,
-# поэтому они, как сборочные чертежи и материалы 3мм, идут со снятой
-# галочкой копирования по умолчанию.
+# *ORD######*. На такие детали программу не пишут — как сборочные чертежи
+# и материалы 3мм, идут со столбцом "Станок" = "-".
 STANDARD_BLANK_RE = re.compile(r"\*R\d+\*")
 
 
@@ -771,7 +769,6 @@ def parse_pdf_sketches(pdf_path):
                 "raw_name": os.path.basename(pdf_path),
                 "auto_exclude": is_too_thin or is_excluded_name or is_blank or is_bad_diagonal or is_glass,
                 "exclude_reason": exclude_reason,
-                "page": i,
             })
 
     if order_votes:
@@ -790,8 +787,7 @@ def parse_pdf_sketches(pdf_path):
     if n_not_machinable:
         warnings.append(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable} — показаны в таблице для проверки, галочка копирования "
-            f"снята по умолчанию."
+            f'{n_not_machinable} — показаны в таблице со столбцом "Станок" = "-".'
         )
 
     if not results:
@@ -918,7 +914,7 @@ class SketchExtractorApp:
         self.theme_toggle_btn.pack(side="right")
         self._reg(self.theme_toggle_btn, "secondary_button", surface="bg")
 
-        # --- Карточка "Основное": файл, тип эскиза, дата запуска ---
+        # --- Карточка "Основное": файл, источник, дата запуска ---
         main_card = ctk.CTkFrame(root, corner_radius=16, border_width=1, fg_color=t["card"], border_color=t["border"])
         main_card.pack(fill="x", padx=8, pady=4)
         self._reg(main_card, "card", surface="bg")
@@ -1002,14 +998,12 @@ class SketchExtractorApp:
         self._reg(tree_frame, "card", surface="bg")
 
         columns = (
-            "include", "page", "date", "order", "part", "description", "material",
+            "date", "order", "part", "description", "material",
             "type", "extra_sketch", "machine", "edge", "note",
         )
         self.columns = columns
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
         headers = {
-            "include": "Копир.",
-            "page": "Страница",
             "date": "Дата запуска",
             "order": "№ заказа",
             "part": "№ детали",
@@ -1022,7 +1016,7 @@ class SketchExtractorApp:
             "note": "Примечание",
         }
         widths = {
-            "include": 55, "page": 70, "date": 90, "order": 80, "part": 100,
+            "date": 90, "order": 80, "part": 100,
             "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
             "machine": 100, "edge": 60, "note": 150,
         }
@@ -1030,7 +1024,6 @@ class SketchExtractorApp:
             self.tree.heading(c, text=headers[c], anchor="center")
             self.tree.column(c, width=widths[c], anchor="center")
         self.tree.bind("<Button-1>", self.on_tree_click)
-        self.tree.bind("<space>", self.on_tree_space)
 
         # Свои скроллбары (CTkScrollbar — толстый скруглённый акцентный
         # "ползунок", как в референсе) со стрелками-кнопками по краям —
@@ -1234,7 +1227,6 @@ class SketchExtractorApp:
         style.map("Treeview", background=[("selected", t["accent"])], foreground=[("selected", t["accent_text"])])
         style.configure("Treeview.Heading", background=t["bg"], foreground=t["text"], relief="flat")
         style.map("Treeview.Heading", background=[("active", t["bg"])])
-        self.tree.tag_configure("assembly", background=t["input"], foreground=t["muted"])
 
     def _set_empty_state(self, show):
         if show:
@@ -1269,16 +1261,6 @@ class SketchExtractorApp:
             vals[idx] = new_date
             self.tree.item(iid, values=vals)
 
-    def toggle_row_include(self, iid):
-        idx = self.tree.index(iid)
-        if idx >= len(self.current_rows):
-            return
-        row = self.current_rows[idx]
-        row["include"] = not row["include"]
-        vals = list(self.tree.item(iid, "values"))
-        vals[0] = "☑" if row["include"] else "☐"
-        self.tree.item(iid, values=vals)
-
     def on_tree_click(self, event):
         if self.tree.identify_region(event.x, event.y) != "cell":
             return
@@ -1289,11 +1271,7 @@ class SketchExtractorApp:
         if col_index < 0 or col_index >= len(self.columns):
             return
         col_name = self.columns[col_index]
-        if col_name == "include":
-            # Клик по столбцу "Копир." переключает галочку — чисто для
-            # наглядности в таблице, на копирование строк больше не влияет.
-            self.toggle_row_include(iid)
-        elif col_name == "machine":
+        if col_name == "machine":
             self._show_cell_dropdown(event, iid, "machine", MACHINE_OPTIONS)
         elif col_name == "edge":
             self._show_cell_dropdown(event, iid, "edge", EDGE_OPTIONS)
@@ -1316,17 +1294,6 @@ class SketchExtractorApp:
         vals = list(self.tree.item(iid, "values"))
         vals[col_index] = value
         self.tree.item(iid, values=vals)
-
-    def on_tree_space(self, event):
-        # Пробел переключает галочку у выделенной строки (строк) — удобно
-        # при навигации стрелочками, без необходимости кликать мышью.
-        selected = self.tree.selection()
-        if not selected:
-            focused = self.tree.focus()
-            selected = (focused,) if focused else ()
-        for iid in selected:
-            self.toggle_row_include(iid)
-        return "break"
 
     def _install_date_validation(self, entry):
         # Разрешаем печатать только цифры — точки в формате ДД.ММ.ГГГГ
@@ -1486,9 +1453,9 @@ class SketchExtractorApp:
                 if row_type is None:
                     row_type = "inSight"
                     warnings.append(
-                        f'Не удалось определить тип по имени файла "{os.path.basename(path)}" '
+                        f'Не удалось определить источник по имени файла "{os.path.basename(path)}" '
                         f'— установлен "{row_type}" по умолчанию. Проверьте и при необходимости '
-                        f'смените в выпадающем списке "Тип" выше.'
+                        f'смените в выпадающем списке "Источник" выше.'
                     )
                 self.type_var.set(row_type)
                 self.type_combo.configure(state="readonly")
@@ -1517,22 +1484,18 @@ class SketchExtractorApp:
                 "order": order_for_row,
                 "part": part_for_row,
                 "type": row_type,
-                "edge": "",  # кромка — только руками, по эскизу, кликом в таблице
+                "edge": "-",  # кромка — только руками, по эскизу, кликом в таблице
                 "material": item.get("material") or "",
                 "description": item["description"],
                 "extra_sketch": item.get("extra_sketch") or "-",
-                "page": str(item["page"]) if "page" in item else "-",
                 "machine": "-" if auto_exclude else MACHINE_NAME,
                 "note": item.get("exclude_reason") or "",
-                "is_assembly": is_assembly,
-                "include": not auto_exclude,  # для наглядности в таблице — на копирование больше не влияет
             }
             self.tree.insert("", tk.END, values=(
-                "☑" if row["include"] else "☐",
-                row["page"], row["date"], row["order"], row["part"],
+                row["date"], row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
                 row["machine"], row["edge"], row["note"],
-            ), tags=("assembly",) if auto_exclude else ())
+            ))
             self.current_rows.append(row)
 
         self._set_empty_state(not results)
