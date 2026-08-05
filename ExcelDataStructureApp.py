@@ -212,12 +212,15 @@ def fix_clipboard_shortcuts(widget):
 # текстовый буфер без явного шрифта (см. copy_rows_to_excel_clipboard).
 # ---------------------------------------------------------------------------
 
-EXCEL_CELL_FONT_CSS = "font-family:'Calibri Light'; font-size:12pt; font-weight:normal; font-style:normal;"
-
-# Границы ячеек — без них Excel при вставке по HTML-формату буфера убирает
-# рамки назначения (обычный HTML-стиль по умолчанию — без рамок), стирая
-# то, что пользователь уже настроил в самой таблице.
-EXCEL_CELL_BORDER_CSS = "border: 1px solid #000000;"
+# mso-number-format:'\@' заставляет Excel держать ячейку в текстовом
+# формате при вставке — без этого он сам решает, что "01 001" похоже на
+# число, и отображает как "1 001", теряя ведущий ноль. Одинарные кавычки
+# внутри значения — двойные тут нельзя, весь style уже в двойных кавычках
+# HTML-атрибута, и вложенные двойные преждевременно оборвали бы его.
+EXCEL_CELL_FONT_CSS = (
+    "font-family:'Calibri Light'; font-size:12pt; font-weight:normal; "
+    "font-style:normal; text-align:center; mso-number-format:'\\@';"
+)
 
 
 def _html_escape(value):
@@ -229,7 +232,7 @@ def _build_cf_html(row_values):
     Microsoft "HTML Clipboard Format") — заголовок со смещениями (в байтах
     UTF-8 от начала всей строки, включая сам заголовок) до начала/конца
     HTML и до начала/конца самого фрагмента."""
-    style = f"{EXCEL_CELL_FONT_CSS} {EXCEL_CELL_BORDER_CSS}"
+    style = EXCEL_CELL_FONT_CSS
     rows_html = []
     for row in row_values:
         cells = "".join(f'<td style="{style}">{_html_escape(v)}</td>' for v in row)
