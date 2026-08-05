@@ -214,6 +214,12 @@ def fix_clipboard_shortcuts(widget):
 
 EXCEL_CELL_FONT_CSS = "font-family:'Calibri Light'; font-size:12pt; font-weight:normal; font-style:normal;"
 
+# Заливка первой скопированной строки — тот же "Оранжевый" из стандартных
+# цветов Excel, которым пользователь вручную красил первую строку каждой
+# новой вставки, чтобы отделять дни/источники друг от друга в общей
+# таблице. Программа теперь красит эту строку сама при каждом копировании.
+FIRST_ROW_HIGHLIGHT_COLOR = "#FFC000"
+
 
 def _html_escape(value):
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -224,10 +230,14 @@ def _build_cf_html(row_values):
     Microsoft "HTML Clipboard Format") — заголовок со смещениями (в байтах
     UTF-8 от начала всей строки, включая сам заголовок) до начала/конца
     HTML и до начала/конца самого фрагмента."""
-    fragment = "<table>" + "".join(
-        "<tr>" + "".join(f'<td style="{EXCEL_CELL_FONT_CSS}">{_html_escape(v)}</td>' for v in row) + "</tr>"
-        for row in row_values
-    ) + "</table>"
+    rows_html = []
+    for i, row in enumerate(row_values):
+        style = EXCEL_CELL_FONT_CSS
+        if i == 0:
+            style += f" background-color:{FIRST_ROW_HIGHLIGHT_COLOR};"
+        cells = "".join(f'<td style="{style}">{_html_escape(v)}</td>' for v in row)
+        rows_html.append(f"<tr>{cells}</tr>")
+    fragment = "<table>" + "".join(rows_html) + "</table>"
     prefix = "<html><body><!--StartFragment-->"
     suffix = "<!--EndFragment--></body></html>"
     header_template = (
