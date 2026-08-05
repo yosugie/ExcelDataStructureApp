@@ -395,6 +395,18 @@ def is_excluded_part_name(description):
     return bool(description) and description.strip().lower() in NOT_MACHINABLE_PART_NAMES
 
 
+# Стекло станок не фрезерует вообще — в отличие от NOT_MACHINABLE_THICKNESS_MM
+# (там конкретная толщина у обычных плитных материалов), тут исключение по
+# самому типу материала, независимо от толщины и названия детали (у стекольных
+# деталей встречаются разные названия: "Полка стекло", "Стекло в фасад",
+# "Стекло в фасад прав." и т.п. — перечислять их все ненадёжно).
+GLASS_MATERIAL_RE = re.compile(r"^Стекло\b", re.IGNORECASE)
+
+
+def is_glass_material(material):
+    return bool(material) and bool(GLASS_MATERIAL_RE.match(material))
+
+
 def looks_like_sketch_folder(name):
     return "эск" in (name or "").lower()
 
@@ -480,6 +492,7 @@ def parse_bln_sketches(bln_path):
 
         thickness_mm = material_thickness_mm(material)
         is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
+        is_glass = is_glass_material(material)
 
         if not part_codes and not is_assembly:
             m2 = CODE_IN_NAME_RE.search(fname)
@@ -504,7 +517,7 @@ def parse_bln_sketches(bln_path):
             part_codes = [f"{section} СБ" if section else "СБ"]
             if not description:
                 description = os.path.splitext(fname)[0]
-        elif is_too_thin or is_excluded_name:
+        elif is_too_thin or is_excluded_name or is_glass:
             n_not_machinable += 1
 
         if not part_codes:
@@ -530,7 +543,7 @@ def parse_bln_sketches(bln_path):
                 "source_dir": dir_name,
                 "raw_name": fname,
                 "is_assembly": is_assembly,
-                "auto_exclude": is_assembly or is_too_thin or is_excluded_name,
+                "auto_exclude": is_assembly or is_too_thin or is_excluded_name or is_glass,
             })
 
     if n_not_machinable:
@@ -709,6 +722,7 @@ def parse_pdf_sketches(pdf_path):
             is_excluded_name = is_excluded_part_name(part_name)
             is_blank = is_standard_blank(text)
             is_bad_diagonal = is_unmachinable_diagonal_cut(text)
+            is_glass = is_glass_material(material)
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
@@ -721,7 +735,7 @@ def parse_pdf_sketches(pdf_path):
                 "extra_sketch": extra_sketch,
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
-                "auto_exclude": is_too_thin or is_excluded_name or is_blank or is_bad_diagonal,
+                "auto_exclude": is_too_thin or is_excluded_name or is_blank or is_bad_diagonal or is_glass,
                 "page": i,
             })
 
