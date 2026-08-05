@@ -214,11 +214,16 @@ def fix_clipboard_shortcuts(widget):
 
 EXCEL_CELL_FONT_CSS = "font-family:'Calibri Light'; font-size:12pt; font-weight:normal; font-style:normal;"
 
+# Границы ячеек — без них Excel при вставке по HTML-формату буфера убирает
+# рамки назначения (обычный HTML-стиль по умолчанию — без рамок), стирая
+# то, что пользователь уже настроил в самой таблице.
+EXCEL_CELL_BORDER_CSS = "border: 1px solid #000000;"
+
 # Заливка первой скопированной строки — тот же "Оранжевый" из стандартных
 # цветов Excel, которым пользователь вручную красил первую строку каждой
 # новой вставки, чтобы отделять дни/источники друг от друга в общей
 # таблице. Программа теперь красит эту строку сама при каждом копировании.
-FIRST_ROW_HIGHLIGHT_COLOR = "#FFC000"
+FIRST_ROW_HIGHLIGHT_COLOR = "#D9A300"
 
 
 def _html_escape(value):
@@ -232,10 +237,14 @@ def _build_cf_html(row_values):
     HTML и до начала/конца самого фрагмента."""
     rows_html = []
     for i, row in enumerate(row_values):
-        style = EXCEL_CELL_FONT_CSS
+        style = f"{EXCEL_CELL_FONT_CSS} {EXCEL_CELL_BORDER_CSS}"
         if i == 0:
             style += f" background-color:{FIRST_ROW_HIGHLIGHT_COLOR};"
         cells = "".join(f'<td style="{style}">{_html_escape(v)}</td>' for v in row)
+        # Один лишний пустой столбец справа — под "Кромку" в самой
+        # Excel-таблице пользователя (программа её не ведёт), чтобы заливка
+        # первой строки доходила и до неё сплошной цветной полосой.
+        cells += f'<td style="{style}"></td>'
         rows_html.append(f"<tr>{cells}</tr>")
     fragment = "<table>" + "".join(rows_html) + "</table>"
     prefix = "<html><body><!--StartFragment-->"
