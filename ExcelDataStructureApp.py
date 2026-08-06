@@ -917,11 +917,13 @@ class CopySelectionDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self._content, text="Отметьте виды деталей, которые нужно копировать в буфер:",
-            text_color=colors["text"], wraplength=360, justify="left",
+            text_color=colors["text"], wraplength=470, justify="left",
         ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
 
+        # Пошире обычного — второй строкой у каждого вида идёт материал, а
+        # он бывает длинным ("Стекло тонированное 5 бронза (Артикул ...)").
         self._scroll = ctk.CTkScrollableFrame(
-            self._content, width=360, height=320, corner_radius=12,
+            self._content, width=470, height=320, corner_radius=12,
             fg_color=colors["input"], scrollbar_button_color=colors["border"],
             scrollbar_button_hover_color=colors["muted"],
         )
@@ -958,16 +960,26 @@ class CopySelectionDialog(ctk.CTkToplevel):
         # Отмеченные (то, что копируем) — наверх списка, снятые — вниз.
         items = sorted(
             counts.items(),
-            key=lambda pair: (not checked_state.get(pair[0], True), (pair[0] or "").lower()),
+            key=lambda pair: (
+                not checked_state.get(pair[0], True),
+                (pair[0][0] or "").lower(),
+                (pair[0][1] or "").lower(),
+            ),
         )
-        for description, count in items:
+        for group_key, count in items:
+            description, material = group_key
+            # Материал — второй строкой: одинаково названные детали из
+            # разного материала это разные виды, и различить их можно
+            # только по нему (см. SketchExtractorApp._row_group_key).
             label = f"{description or '(без названия)'} ({count})"
-            var = tk.BooleanVar(value=checked_state.get(description, True))
+            if material:
+                label += f"\n{material}"
+            var = tk.BooleanVar(value=checked_state.get(group_key, True))
             ctk.CTkCheckBox(
                 self._scroll, text=label, variable=var,
                 text_color=colors["text"], fg_color=colors["accent"],
                 hover_color=colors["accent_hover"], border_color=colors["border"],
-                command=lambda d=description, v=var: self._on_toggle(d, v.get()),
+                command=lambda k=group_key, v=var: self._on_toggle(k, v.get()),
             ).pack(anchor="w", pady=4, padx=4)
 
     def refresh(self, counts, checked_state):
@@ -1241,10 +1253,10 @@ class SketchExtractorApp:
         self.current_rows = []  # список dict-ов с результатами разбора
         self.current_kind = None  # "bazis" или "pdf"
         # Ручные переопределения из диалога "Что копировать":
-        # {"Описание": копировать_ли}. Есть запись — воля пользователя
-        # побеждает; нет — используется "auto_exclude" конкретной строки
-        # (см. _apply_row_styling).
-        self.description_overrides = {}
+        # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
+        # Есть запись — воля пользователя побеждает; нет — используется
+        # "auto_exclude" конкретной строки (см. _apply_row_styling).
+        self.group_overrides = {}
         self._copy_selection_dialog = None
 
         self.apply_theme()
@@ -1348,14 +1360,23 @@ class SketchExtractorApp:
     def show_message(self, title, message):
         MessageDialog(self.root, THEMES[self.theme], self._icon_imgs, self.theme, title, message)
 
+    @staticmethod
+    def _row_group_key(row):
+        """Вид детали для диалога "Что копировать" — ПАРА "Описание +
+        Материал", а не одно только описание: в одном заказе встречаются
+        одинаково названные детали из разного материала (например "Стенка
+        задняя" из ЛДСП 16 и она же из ХДФ 3мм), и отмечать их надо
+        по отдельности."""
+        return (row["description"], row["material"])
+
     def _copy_selection_counts_and_state(self):
         counts = {}
         all_auto_included = {}
         for row in self.current_rows:
-            d = row["description"]
-            counts[d] = counts.get(d, 0) + 1
+            key = self._row_group_key(row)
+            counts[key] = counts.get(key, 0) + 1
             included = not row["auto_exclude"]
-            all_auto_included[d] = all_auto_included.get(d, True) and included
+            all_auto_included[key] = all_auto_included.get(key, True) and included
         # Галочка снята по умолчанию, если хоть одну строку этого вида
         # программа сама исключила (или так выбрано вручную ранее) — но пока
         # пользователь не кликнет по галочке сам, это только для наглядности
@@ -1363,7 +1384,7 @@ class SketchExtractorApp:
         # _apply_row_styling — там в силе остаётся "auto_exclude" каждой
         # строки, если явного выбора для этого вида ещё не было).
         checked_state = {
-            d: self.description_overrides.get(d, all_auto_included[d]) for d in counts
+            key: self.group_overrides.get(key, all_auto_included[key]) for key in counts
         }
         return counts, checked_state
 
@@ -1374,7 +1395,7 @@ class SketchExtractorApp:
         counts, checked_state = self._copy_selection_counts_and_state()
         self._copy_selection_dialog = CopySelectionDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            counts, checked_state, self.toggle_description_copying,
+            counts, checked_state, self.toggle_group_copying,
             self.reset_copy_selection_to_auto, self.select_all_for_copying,
         )
 
@@ -1382,27 +1403,27 @@ class SketchExtractorApp:
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.refresh(*self._copy_selection_counts_and_state())
 
-    def toggle_description_copying(self, description, is_included):
-        self.description_overrides[description] = is_included
+    def toggle_group_copying(self, group_key, is_included):
+        self.group_overrides[group_key] = is_included
         self._apply_row_styling()
 
     def reset_copy_selection_to_auto(self):
         # Убирает ручные переопределения — состояние снова решает только
         # "auto_exclude" (то, что программа сама нашла при разборе файла).
-        self.description_overrides = {}
+        self.group_overrides = {}
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
 
     def select_all_for_copying(self):
         # Отмечает вообще все виды — временно копируется всё, включая то,
         # что программа сама считает не идущим на станок.
-        self.description_overrides = {row["description"]: True for row in self.current_rows}
+        self.group_overrides = {self._row_group_key(row): True for row in self.current_rows}
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
 
     def _apply_row_styling(self):
         for iid, row in zip(self.tree.get_children(), self.current_rows):
-            included = self.description_overrides.get(row["description"], not row["auto_exclude"])
+            included = self.group_overrides.get(self._row_group_key(row), not row["auto_exclude"])
             row["include"] = included
             self.tree.item(iid, tags=() if included else ("excluded",))
 
@@ -1503,7 +1524,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = None
-        self.description_overrides = {}
+        self.group_overrides = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
@@ -1571,7 +1592,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = kind
-        self.description_overrides = {}
+        self.group_overrides = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
@@ -1638,7 +1659,7 @@ class SketchExtractorApp:
                 # разным материалом (например "Стенка задняя" из ЛДСП 16 и
                 # "Стенка задняя" из ХДФ 3мм в одном заказе) не совпадает
                 # состояние исключения, пока пользователь сам не сгруппирует
-                # их вручную через "Что копировать" (см. description_overrides).
+                # их вручную через "Что копировать" (см. group_overrides).
                 "auto_exclude": auto_exclude,
                 "include": not auto_exclude,
             }
