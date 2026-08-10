@@ -653,6 +653,38 @@ def extract_standard_blank_code(text):
     m = STANDARD_BLANK_RE.search(text)
     return m.group(1) if m else None
 
+
+# Детали, под которые у пользователя УЖЕ заготовлена параметрическая
+# программа на станке: писать программу заново не нужно, в "Дата готовности"
+# вместо даты идёт номер этой программы ("P010" и т.п.) — по тому же
+# принципу, что и коды стандартных заготовок "R061" выше.
+#
+# ВАЖНО: в самом PDF этих кодов НЕТ (проверено по всем страницам реального
+# отчёта — там встречаются только штрихкод-маркировки *R0xx*), поэтому
+# сопоставление идёт по названию детали и список ведётся вручную: появится
+# новая параметрическая программа — добавить сюда строку.
+#
+# Второе значение пары — столбец "Кромка": он означает "кромим ли МЫ эту
+# деталь на своём станке", а НЕ "есть ли кромка на эскизе". Это разные
+# вещи: у "Бок левый"/"Бок правый" в чертеже все четыре грани оклеены, но
+# на станке пользователя они только фрезеруются, поэтому тут "Нет".
+# Выводить кромку из текста эскиза (там видно "КрАБС19-0.8" против "--")
+# НЕЛЬЗЯ — получится ответ не на тот вопрос.
+#
+# Только для inSight (.pdf) — в Базисе (.bln) не применяется.
+PARAMETRIC_PROGRAMS = {
+    "горизонтальный щит mb": ("P010", "Есть"),
+    "задняя стенка в паз лдсп": ("P002", "Нет"),
+    "бок левый": ("P004", "Нет"),
+    "бок правый": ("P004", "Нет"),
+}
+
+
+def lookup_parametric_program(description):
+    """Возвращает (код_программы, кромка) или (None, None)."""
+    key = (description or "").strip().lower()
+    return PARAMETRIC_PROGRAMS.get(key, (None, None))
+
 # Материал с толщиной в тексте PDF, например:
 # "0 ЭР35521 ЛДСП 16 Кашемир U702 СТ9 2800х2070 ..." -> "ЛДСП 16 Кашемир U702 СТ9"
 MATERIAL_PDF_RE = re.compile(
@@ -776,6 +808,7 @@ def parse_pdf_sketches(pdf_path):
             blank_code = extract_standard_blank_code(text)
             is_bad_diagonal = is_unmachinable_diagonal_cut(text)
             is_glass = is_glass_material(material)
+            program_code, program_edge = lookup_parametric_program(part_name)
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
@@ -786,7 +819,11 @@ def parse_pdf_sketches(pdf_path):
                 "description": part_name or "",
                 "material": material,
                 "extra_sketch": extra_sketch,
-                "standard_blank_code": blank_code,
+                # Код стандартной заготовки с эскиза важнее номера
+                # параметрической программы: он прочитан из самого документа,
+                # а не подставлен по названию (на практике не пересекаются).
+                "standard_blank_code": blank_code or program_code,
+                "edge": program_edge or "",
                 "source_dir": "",
                 "raw_name": os.path.basename(pdf_path),
                 "auto_exclude": is_too_thin or is_excluded_name or is_bad_diagonal or is_glass,
@@ -1133,7 +1170,7 @@ class SketchExtractorApp:
 
         columns = (
             "date", "order", "part", "description", "material",
-            "type", "extra_sketch", "ready_date",
+            "type", "extra_sketch", "ready_date", "edge",
         )
         self.columns = columns
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
@@ -1146,11 +1183,12 @@ class SketchExtractorApp:
             "type": "Источник",
             "extra_sketch": "Доп. эскиз",
             "ready_date": "Дата готовности",
+            "edge": "Кромка",
         }
         widths = {
             "date": 90, "order": 80, "part": 100,
             "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
-            "ready_date": 110,
+            "ready_date": 110, "edge": 70,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1664,11 +1702,16 @@ class SketchExtractorApp:
                 "material": item.get("material") or "",
                 "description": item["description"],
                 "extra_sketch": item.get("extra_sketch") or "Нет",
-                # Код стандартной заготовки (например "R061") вместо даты —
-                # единственное исключение из правила "программа никогда не
-                # пишет в Дата готовности", иначе всегда пусто (заполняется
-                # пользователем в Excel по мере выполнения заказа).
+                # Код стандартной заготовки ("R061") или параметрической
+                # программы ("P004") вместо даты — единственное исключение из
+                # правила "программа никогда не пишет в Дата готовности",
+                # иначе всегда пусто (заполняется пользователем в Excel по
+                # мере выполнения заказа).
                 "ready_date": blank_code or "",
+                # Кромка — только для деталей с заготовленной параметрической
+                # программой (см. PARAMETRIC_PROGRAMS). У остальных пусто:
+                # пользователь выбирает сам из выпадающего списка в Excel.
+                "edge": item.get("edge") or "",
                 # Своё "auto_exclude" на КАЖДОЙ строке (а не на весь вид
                 # детали разом) — так у двух одинаково названных деталей с
                 # разным материалом (например "Стенка задняя" из ЛДСП 16 и
@@ -1681,7 +1724,7 @@ class SketchExtractorApp:
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["ready_date"],
+                row["ready_date"], row["edge"],
             ), tags=("excluded",) if auto_exclude else ())
             self.current_rows.append(row)
 
@@ -1698,11 +1741,11 @@ class SketchExtractorApp:
             if not row["include"]:
                 continue
             # B=дата запуска, C=заказ, D=деталь, E=описание, F=материал,
-            # G=источник, H=доп. эскиз, I=дата готовности.
+            # G=источник, H=доп. эскиз, I=дата готовности, J=кромка.
             row_values.append([
                 date_start, row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["ready_date"],
+                row["ready_date"], row["edge"],
             ])
 
         if not row_values:
