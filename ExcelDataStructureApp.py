@@ -444,8 +444,16 @@ def looks_like_sketch_folder(name):
     return "эск" in (name or "").lower()
 
 
+# "Эск"/"Эскиз" + номер ГДЕ УГОДНО в имени файла, не только в начале:
+# конструкторы называют эскизы по-разному — и "Эск1 03 010 (Бок правый)"
+# (номер эскиза впереди), и "01 006 (Бок правый) эскиз 1." (номер детали
+# впереди, пометка про эскиз в конце). Раньше требовалось начало строки,
+# и второй вариант не находился вовсе.
+SKETCH_FILENAME_RE = re.compile(r"\bЭск(?:из)?\s*\d+", re.IGNORECASE)
+
+
 def looks_like_sketch_filename(name):
-    return bool(re.match(r"^Эск(?:из)?\s*\d+", name or "", re.IGNORECASE))
+    return bool(SKETCH_FILENAME_RE.search(name or ""))
 
 
 def is_assembly_filename(name):
@@ -472,12 +480,9 @@ def parse_bln_sketches(bln_path):
     except ET.ParseError as e:
         raise CfbReadError(f"Не удалось разобрать внутренний XML-индекс: {e}")
 
-    candidates = []
-    for directory in root.findall("Directory"):
-        name_el = directory.find("Name")
-        dir_name = name_el.text if name_el is not None else ""
+    def collect_files(parent, dir_name):
         is_sketch_dir = looks_like_sketch_folder(dir_name)
-        for file_el in directory.findall("File"):
+        for file_el in parent.findall("File"):
             fname_el = file_el.find("Name")
             storage_el = file_el.find("Storage")
             if fname_el is None or storage_el is None or not fname_el.text:
@@ -485,6 +490,16 @@ def parse_bln_sketches(bln_path):
             fname = fname_el.text
             if is_sketch_dir or looks_like_sketch_filename(fname):
                 candidates.append((dir_name, fname, storage_el.text))
+
+    candidates = []
+    # Файлы, лежащие прямо в корне библиотеки, а не внутри папки — эскизы
+    # бывают и там (например "01 006 (Бок правый) эскиз 1..ldw" рядом с
+    # папками моделей). Раньше корень не просматривался вообще, и такие
+    # эскизы терялись молча.
+    collect_files(root, "")
+    for directory in root.findall("Directory"):
+        name_el = directory.find("Name")
+        collect_files(directory, name_el.text if name_el is not None else "")
 
     results = []
     order_votes = {}
