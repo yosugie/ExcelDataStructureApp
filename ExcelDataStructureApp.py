@@ -1083,7 +1083,32 @@ class SketchExtractorApp:
         self._themed = []
         t = THEMES[self.theme]  # стартовые цвета — тема "dark" по умолчанию
 
-        # --- Шапка: заголовок приложения + переключатель темы ---
+        # Интерфейс собирается по частям: каждый метод строит свой блок, а
+        # порядок вызовов = порядок блоков в окне сверху вниз (виджеты
+        # раскладываются через pack, так что порядок здесь важен).
+        self._build_top_bar(root, t)
+        self._build_main_card(root, t)
+        self._build_status(root, t)
+        self._build_table(root, t)
+        self._build_buttons(root, t)
+        self._build_log(root, t)
+
+        self.current_rows = []  # список dict-ов с результатами разбора
+        self.current_kind = None  # "bazis" или "pdf"
+        # Ручные переопределения из диалога "Что копировать":
+        # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
+        # Есть запись — воля пользователя побеждает; нет — используется
+        # "auto_exclude" конкретной строки (см. _apply_row_styling).
+        self.group_overrides = {}
+        self._copy_selection_dialog = None
+        # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
+        self._parse_thread = None
+        self._parse_queue = None
+
+        self.apply_theme()
+
+    def _build_top_bar(self, root, t):
+        """Шапка: заголовок приложения + переключатель темы."""
         top_bar = ctk.CTkFrame(root, fg_color=t["bg"])
         top_bar.pack(fill="x", padx=8, pady=(8, 4))
         self._reg(top_bar, "plain_frame", surface="bg")
@@ -1101,7 +1126,8 @@ class SketchExtractorApp:
         self.theme_toggle_btn.pack(side="right")
         self._reg(self.theme_toggle_btn, "secondary_button", surface="bg")
 
-        # --- Карточка "Основное": файл, источник, дата запуска ---
+    def _build_main_card(self, root, t):
+        """Карточка "Основное": файл, источник, дата запуска, "Что копировать"."""
         main_card = ctk.CTkFrame(root, corner_radius=16, border_width=1, fg_color=t["card"], border_color=t["border"])
         main_card.pack(fill="x", padx=8, pady=4)
         self._reg(main_card, "card", surface="bg")
@@ -1179,13 +1205,15 @@ class SketchExtractorApp:
         self.copy_selection_btn.pack(side="right")
         self._reg(self.copy_selection_btn, "secondary_button")
 
-        # --- Статус-строка ---
+    def _build_status(self, root, t):
+        """Строка состояния под карточкой."""
         self.status_var = tk.StringVar(value="")
         self.status_label = ctk.CTkLabel(root, textvariable=self.status_var, anchor="w")
         self.status_label.pack(fill="x", padx=16, pady=(4, 6))
         self._reg(self.status_label, "muted_label", surface="bg")
 
-        # --- Карточка с таблицей результатов (сам Treeview — не CustomTkinter,
+    def _build_table(self, root, t):
+        """Карточка с таблицей результатов и своими скроллбарами."""
         # в библиотеке нет виджета-таблицы; только карточка вокруг перекрашена) ---
         self.tree_frame = tree_frame = ctk.CTkFrame(root, corner_radius=16, border_width=1, fg_color=t["card"], border_color=t["border"])
         tree_frame.pack(fill="both", expand=True, padx=8, pady=4)
@@ -1279,7 +1307,8 @@ class SketchExtractorApp:
         )
         self._reg(self.empty_state_label, "empty_state_label")
 
-        # --- Кнопки действий ---
+    def _build_buttons(self, root, t):
+        """Кнопки действий под таблицей."""
         btn_frame = ctk.CTkFrame(root, fg_color=t["bg"])
         btn_frame.pack(fill="x", padx=8, pady=6)
         self._reg(btn_frame, "plain_frame", surface="bg")
@@ -1298,7 +1327,8 @@ class SketchExtractorApp:
         self.clear_btn.pack(side="left", padx=(8, 0))
         self._reg(self.clear_btn, "secondary_button", surface="bg")
 
-        # --- Карточка "Журнал" (сворачиваемая, шеврон в шапке той же карточки) ---
+    def _build_log(self, root, t):
+        """Карточка «Журнал» (сворачиваемая)."""
         self.log_expanded = False
         self.log_count = 0
 
@@ -1325,20 +1355,6 @@ class SketchExtractorApp:
         fix_clipboard_shortcuts(self.log_text)
         self._reg(self.log_text, "textbox")
         # log_body остаётся не упакованным — журнал стартует свёрнутым.
-
-        self.current_rows = []  # список dict-ов с результатами разбора
-        self.current_kind = None  # "bazis" или "pdf"
-        # Ручные переопределения из диалога "Что копировать":
-        # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
-        # Есть запись — воля пользователя побеждает; нет — используется
-        # "auto_exclude" конкретной строки (см. _apply_row_styling).
-        self.group_overrides = {}
-        self._copy_selection_dialog = None
-        # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
-        self._parse_thread = None
-        self._parse_queue = None
-
-        self.apply_theme()
 
     def _reg(self, widget, kind, surface="card"):
         # surface — какой фон стоит НЕПОСРЕДСТВЕННО за виджетом ("bg" — фон
