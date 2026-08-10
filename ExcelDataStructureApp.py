@@ -41,11 +41,13 @@
 import os
 import re
 import sys
+import queue
 import struct
 import ctypes
 import base64
 import tempfile
 import datetime
+import threading
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import ttk, filedialog
@@ -1124,11 +1126,11 @@ class SketchExtractorApp:
         if HAS_DND:
             self.path_entry.drop_target_register(DND_FILES)
             self.path_entry.dnd_bind("<<Drop>>", self.on_drop)
-        browse_btn = ctk.CTkButton(
+        self.browse_btn = ctk.CTkButton(
             file_row, text="Обзор...", command=self.browse_file, height=32, width=90, corner_radius=20,
         )
-        browse_btn.pack(side="left")
-        self._reg(browse_btn, "secondary_button")
+        self.browse_btn.pack(side="left")
+        self._reg(self.browse_btn, "secondary_button")
 
         type_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         type_row.pack(fill="x", padx=16, pady=4)
@@ -1332,6 +1334,9 @@ class SketchExtractorApp:
         # "auto_exclude" конкретной строки (см. _apply_row_styling).
         self.group_overrides = {}
         self._copy_selection_dialog = None
+        # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
+        self._parse_thread = None
+        self._parse_queue = None
 
         self.apply_theme()
 
@@ -1646,6 +1651,15 @@ class SketchExtractorApp:
             self.tree.item(iid, values=vals)
 
     def run_parse(self):
+        # Разбор идёт в ОТДЕЛЬНОМ потоке: у большого PDF (80 страниц) чтение
+        # текста через pdfplumber занимает ~16 секунд, и если делать это прямо
+        # здесь, окно всё это время не перерисовывается — Windows показывает
+        # "Программа не отвечает", как будто она зависла. Сам разбор при этом
+        # не ускоряется (время съедает pdfplumber), но окно остаётся живым и
+        # видно надпись "Разбираю файл...".
+        if self._parse_thread is not None and self._parse_thread.is_alive():
+            return  # уже разбираем — второй запуск игнорируем
+
         path = self.path_entry.get().strip()
         if not path:
             self.show_message("Нет файла", "Выберите файл .bln или .pdf.")
@@ -1681,32 +1695,61 @@ class SketchExtractorApp:
         self.log_count = 0
         self.toggle_log(expanded=False)
 
+        self.status_var.set(f"Разбираю файл: {os.path.basename(path)}...")
+        self._set_busy(True)
+
+        # Поток только читает файл и отдаёт результат через очередь — никаких
+        # обращений к виджетам оттуда (tkinter этого не допускает).
+        self._parse_queue = queue.Queue()
+
+        def worker():
+            try:
+                fn = parse_bln_sketches if kind == "bazis" else parse_pdf_sketches
+                self._parse_queue.put(("ok", fn(path)))
+            except Exception as e:  # noqa: BLE001 — текст ошибки покажем пользователю
+                self._parse_queue.put(("error", e))
+
+        self._parse_thread = threading.Thread(target=worker, daemon=True)
+        self._parse_thread.start()
+        self.root.after(100, lambda: self._poll_parse(kind, path))
+
+    def _set_busy(self, busy):
+        """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
+        выбор нового файла посреди чтения только запутали бы."""
+        state = "disabled" if busy else "normal"
+        for btn in (self.browse_btn, self.clear_btn, self.copy_btn):
+            btn.configure(state=state)
+
+    def _poll_parse(self, kind, path):
         try:
-            if kind == "bazis":
-                order_number, results, warnings = parse_bln_sketches(path)
-                row_type = "Базис"
-                self.type_var.set(row_type)
-                self.type_combo.configure(state="readonly")
-            else:
-                order_number, results, warnings = parse_pdf_sketches(path)
-                row_type = detect_pdf_source_type(os.path.basename(path))
-                if row_type is None:
-                    row_type = "inSight"
-                    warnings.append(
-                        f'Не удалось определить источник по имени файла "{os.path.basename(path)}" '
-                        f'— установлен "{row_type}" по умолчанию. Проверьте и при необходимости '
-                        f'смените в выпадающем списке "Источник" выше.'
-                    )
-                self.type_var.set(row_type)
-                self.type_combo.configure(state="readonly")
-        except CfbReadError as e:
-            self.show_message("Не удалось разобрать файл", str(e))
+            status, payload = self._parse_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(100, lambda: self._poll_parse(kind, path))
+            return
+
+        self._set_busy(False)
+        if status == "error":
+            title = ("Не удалось разобрать файл" if isinstance(payload, CfbReadError)
+                     else "Непредвиденная ошибка")
+            self.show_message(title, str(payload))
             self.status_var.set("Ошибка при разборе файла.")
             return
-        except Exception as e:
-            self.show_message("Непредвиденная ошибка", str(e))
-            self.status_var.set("Ошибка при разборе файла.")
-            return
+        self._fill_results(kind, path, *payload)
+
+    def _fill_results(self, kind, path, order_number, results, warnings):
+        if kind == "bazis":
+            row_type = "Базис"
+        else:
+            row_type = detect_pdf_source_type(os.path.basename(path))
+            if row_type is None:
+                row_type = "inSight"
+                warnings.append(
+                    f'Не удалось определить источник по имени файла "{os.path.basename(path)}" '
+                    f'— установлен "{row_type}" по умолчанию. Проверьте и при необходимости '
+                    f'смените в выпадающем списке "Источник" выше.'
+                )
+        self.type_var.set(row_type)
+        self.type_combo.configure(state="readonly")
 
         for w in warnings:
             self.log(f"⚠ {w}")
