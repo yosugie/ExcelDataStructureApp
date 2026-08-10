@@ -463,8 +463,26 @@ def is_assembly_filename(name):
     return bool(ASSEMBLY_WORD_RE.search(name or ""))
 
 
+def not_machinable_warning(what_and_count):
+    """Общий хвост предупреждений про строки, снятые с копирования — один на
+    оба разборщика, чтобы формулировка не разъезжалась при правках."""
+    return (
+        f"{what_and_count} — показаны в таблице серым, копирование по умолчанию "
+        f'исключено (можно поправить в "Что копировать").'
+    )
+
+
+# Ключи строки результата, общие для обоих разборщиков (.bln и .pdf):
+#   order_from_content  — номер заказа, найденный внутри самого документа
+#   part_code           — номер детали ("01 006", "ICN21433045", "a; b")
+#   description         — название детали (столбец "Описание")
+#   material            — строка материала целиком
+#   auto_exclude        — программа сама считает, что деталь не идёт на станок
+# Только у .pdf (у .bln их просто нет, читать через .get()):
+#   extra_sketch, standard_blank_code, edge
 def parse_bln_sketches(bln_path):
-    """Возвращает (order_number, [ {part_code, description, source_dir} ], warnings)."""
+    """Возвращает (order_number, [строки результата], warnings) — состав строки
+    описан в комментарии выше."""
     warnings = []
     container = CfbContainer(bln_path)
 
@@ -589,24 +607,19 @@ def parse_bln_sketches(bln_path):
                 "part_code": part_code,
                 "description": description,
                 "material": material,
-                "source_dir": dir_name,
-                "raw_name": fname,
-                "is_assembly": is_assembly,
                 "auto_exclude": is_assembly or is_too_thin or is_excluded_name or is_glass,
             })
 
     if n_not_machinable:
-        warnings.append(
+        warnings.append(not_machinable_warning(
             f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable} — показаны в таблице серым, копирование по умолчанию "
-            f'исключено (можно поправить в "Что копировать").'
-        )
+            f"{n_not_machinable}"
+        ))
 
     if n_assembly:
-        warnings.append(
-            f"Найдено сборочных чертежей (СБ): {n_assembly} — показаны в таблице серым, "
-            f'копирование по умолчанию исключено (можно поправить в "Что копировать").'
-        )
+        warnings.append(not_machinable_warning(
+            f"Найдено сборочных чертежей (СБ): {n_assembly}"
+        ))
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
     # (самое частое совпадение), а не имя файла .bln, которое могут переименовать.
@@ -785,10 +798,10 @@ def detect_pdf_source_type(filename):
 
 
 def parse_pdf_sketches(pdf_path):
-    """Возвращает (order_number, [ {part_code, description, source_dir} ], warnings).
-
-    Формат результата такой же, как у parse_bln_sketches, чтобы GUI мог
-    обрабатывать оба источника одним и тем же кодом.
+    """Возвращает (order_number, [строки результата], warnings) — тот же формат,
+    что и у parse_bln_sketches (см. комментарий там), чтобы GUI мог обрабатывать
+    оба источника одним и тем же кодом. Плюс поля, которых у .bln не бывает:
+    extra_sketch, standard_blank_code, edge.
     """
     if not HAS_PDFPLUMBER:
         raise CfbReadError(
@@ -833,8 +846,6 @@ def parse_pdf_sketches(pdf_path):
                 # а не подставлен по названию (на практике не пересекаются).
                 "standard_blank_code": blank_code or program_code,
                 "edge": program_edge or "",
-                "source_dir": "",
-                "raw_name": os.path.basename(pdf_path),
                 "auto_exclude": is_too_thin or is_excluded_name or is_bad_diagonal or is_glass,
             })
 
@@ -853,9 +864,10 @@ def parse_pdf_sketches(pdf_path):
     n_not_machinable = sum(1 for r in results if r.get("auto_exclude"))
     if n_not_machinable:
         warnings.append(
-            f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable} — показаны в таблице серым, копирование по умолчанию "
-            f'исключено (можно поправить в "Что копировать").'
+            not_machinable_warning(
+                f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
+                f"{n_not_machinable}"
+            )
         )
 
     if not results:
@@ -1506,9 +1518,13 @@ class SketchExtractorApp:
         self.date_var.set(datetime.date.today().strftime("%d.%m.%Y"))
 
     def refresh_date_column(self):
+        # Обновляем и таблицу, и сами строки: в буфер дата берётся напрямую из
+        # поля ввода, но если оставить в строках старую, любая будущая правка,
+        # читающая row["date"], молча получит дату на момент разбора файла.
         new_date = self.date_var.get()
         idx = self.columns.index("date")
-        for iid in self.tree.get_children():
+        for iid, row in zip(self.tree.get_children(), self.current_rows):
+            row["date"] = new_date
             vals = list(self.tree.item(iid, "values"))
             vals[idx] = new_date
             self.tree.item(iid, values=vals)
