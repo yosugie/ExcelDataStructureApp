@@ -915,6 +915,10 @@ THEMES = {
 SUCCESS_COLOR = "#22c55e"
 ERROR_COLOR = "#ef4444"
 
+# Кадры анимации индикатора загрузки — четыре "четвертушки" круга по кругу
+# создают эффект вращения без Canvas/GIF, просто сменой символа по таймеру.
+LOADING_SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
+
 ctk.set_appearance_mode("dark")  # стартовая тема; переключение — вручную, см. toggle_theme()
 
 
@@ -1104,6 +1108,7 @@ class SketchExtractorApp:
         # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
         self._parse_thread = None
         self._parse_queue = None
+        self._loading_after_id = None  # id тика анимации спиннера (см. _set_loading_state)
 
         self.apply_theme()
 
@@ -1307,6 +1312,27 @@ class SketchExtractorApp:
         )
         self._reg(self.empty_state_label, "empty_state_label")
 
+        # Индикатор "Идёт загрузка..." поверх таблицы на время фонового
+        # разбора файла (см. run_parse/_set_loading_state) — тот же приём
+        # позиционирования, что и у empty_state_label выше. Крутящийся
+        # кружок — это просто посимвольная анимация через root.after(),
+        # без Canvas/GIF: четыре кадра LOADING_SPINNER_FRAMES по кругу.
+        self.loading_frame = ctk.CTkFrame(tree_frame, fg_color=t["card"], border_width=0)
+        self._reg(self.loading_frame, "card")
+        self.loading_spinner_var = tk.StringVar(value=LOADING_SPINNER_FRAMES[0])
+        self.loading_spinner_label = ctk.CTkLabel(
+            self.loading_frame, textvariable=self.loading_spinner_var,
+            font=ctk.CTkFont(size=30),
+        )
+        self.loading_spinner_label.pack()
+        self._reg(self.loading_spinner_label, "loading_spinner")
+        self.loading_text_label = ctk.CTkLabel(
+            self.loading_frame, text="Идёт загрузка...",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.loading_text_label.pack(pady=(6, 0))
+        self._reg(self.loading_text_label, "muted_label")
+
     def _build_buttons(self, root, t):
         """Кнопки действий под таблицей."""
         btn_frame = ctk.CTkFrame(root, fg_color=t["bg"])
@@ -1396,6 +1422,8 @@ class SketchExtractorApp:
                 widget.configure(text_color=t["muted"], bg_color=surface_color)
             elif kind == "empty_state_label":
                 widget.configure(text_color=t["muted"], fg_color=t["card"], bg_color=surface_color)
+            elif kind == "loading_spinner":
+                widget.configure(text_color=t["accent"], bg_color=surface_color)
             elif kind == "card":
                 widget.configure(fg_color=t["card"], border_color=t["border"], bg_color=surface_color)
             elif kind == "plain_frame":
@@ -1451,6 +1479,24 @@ class SketchExtractorApp:
             self.empty_state_label.place(in_=self.tree, relx=0.5, rely=0.5, anchor="center")
         else:
             self.empty_state_label.place_forget()
+
+    def _set_loading_state(self, show):
+        """Крутящийся индикатор поверх таблицы на время фонового разбора
+        файла — включается/выключается вместе с _set_busy в run_parse/
+        _poll_parse."""
+        if show:
+            self.loading_frame.place(in_=self.tree, relx=0.5, rely=0.5, anchor="center")
+            self._animate_loading_spinner(0)
+        else:
+            if self._loading_after_id is not None:
+                self.root.after_cancel(self._loading_after_id)
+                self._loading_after_id = None
+            self.loading_frame.place_forget()
+
+    def _animate_loading_spinner(self, frame_idx):
+        self.loading_spinner_var.set(LOADING_SPINNER_FRAMES[frame_idx])
+        next_idx = (frame_idx + 1) % len(LOADING_SPINNER_FRAMES)
+        self._loading_after_id = self.root.after(150, lambda: self._animate_loading_spinner(next_idx))
 
     def show_message(self, title, message):
         MessageDialog(self.root, THEMES[self.theme], self._icon_imgs, self.theme, title, message)
@@ -1713,6 +1759,7 @@ class SketchExtractorApp:
 
         self.status_var.set(f"Разбираю файл: {os.path.basename(path)}...")
         self._set_busy(True)
+        self._set_loading_state(True)
 
         # Поток только читает файл и отдаёт результат через очередь — никаких
         # обращений к виджетам оттуда (tkinter этого не допускает).
@@ -1744,6 +1791,7 @@ class SketchExtractorApp:
             return
 
         self._set_busy(False)
+        self._set_loading_state(False)
         if status == "error":
             title = ("Не удалось разобрать файл" if isinstance(payload, CfbReadError)
                      else "Непредвиденная ошибка")
