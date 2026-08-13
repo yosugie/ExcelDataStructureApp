@@ -481,7 +481,7 @@ def not_machinable_warning(what_and_count):
 #   material            — строка материала целиком
 #   auto_exclude        — программа сама считает, что деталь не идёт на станок
 # Только у .pdf (у .bln их просто нет, читать через .get()):
-#   extra_sketch, standard_blank_code, edge
+#   extra_sketch, standard_blank_code, edge, nonstandard
 def parse_bln_sketches(bln_path):
     """Возвращает (order_number, [строки результата], warnings) — состав строки
     описан в комментарии выше."""
@@ -759,6 +759,17 @@ def extract_extra_sketch_note(text: str):
     return name if name else "Смотри ДОП. Эскиз"
 
 
+# Пометка "НЕСТАНДАРТ" рядом со схемой соединений (M/A/Ø) внизу листа —
+# деталь сделана не по стандартной схеме. Привязана к конкретному листу, а
+# не к названию детали: у одной и той же "Бок левый" одни листы помечены,
+# другие нет — поэтому столбец "Нестандарт" смотрит на каждый лист отдельно.
+NONSTANDARD_RE = re.compile(r"\bНЕСТАНДАРТ\b")
+
+
+def is_nonstandard_part(text: str) -> bool:
+    return bool(NONSTANDARD_RE.search(text))
+
+
 def extract_order_number(text: str):
     """Извлечь номер заказа, убрать пробелы."""
     m = ORDER_RE.search(text)
@@ -803,7 +814,7 @@ def parse_pdf_sketches(pdf_path):
     """Возвращает (order_number, [строки результата], warnings) — тот же формат,
     что и у parse_bln_sketches (см. комментарий там), чтобы GUI мог обрабатывать
     оба источника одним и тем же кодом. Плюс поля, которых у .bln не бывает:
-    extra_sketch, standard_blank_code, edge.
+    extra_sketch, standard_blank_code, edge, nonstandard.
     """
     if not HAS_PDFPLUMBER:
         raise CfbReadError(
@@ -832,6 +843,7 @@ def parse_pdf_sketches(pdf_path):
             material = extract_material_pdf(text) if text.strip() else None
             part_name = extract_part_name_pdf(text) if text.strip() else None
             extra_sketch = extract_extra_sketch_note(text) if text.strip() else None
+            is_nonstandard = is_nonstandard_part(text) if text.strip() else False
             thickness_mm = material_thickness_mm(material)
             is_too_thin = thickness_mm in NOT_MACHINABLE_THICKNESS_MM
             is_excluded_name = is_excluded_part_name(part_name)
@@ -854,6 +866,7 @@ def parse_pdf_sketches(pdf_path):
                 "description": part_name or "",
                 "material": material,
                 "extra_sketch": extra_sketch,
+                "nonstandard": is_nonstandard,
                 # Код стандартной заготовки с эскиза важнее номера
                 # параметрической программы: он прочитан из самого документа,
                 # а не подставлен по названию (на практике не пересекаются).
@@ -1237,7 +1250,7 @@ class SketchExtractorApp:
 
         columns = (
             "date", "order", "part", "description", "material",
-            "type", "extra_sketch", "ready_date", "edge",
+            "type", "extra_sketch", "nonstandard", "ready_date", "edge",
         )
         self.columns = columns
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
@@ -1249,13 +1262,14 @@ class SketchExtractorApp:
             "material": "Материал",
             "type": "Источник",
             "extra_sketch": "Доп. эскиз",
+            "nonstandard": "Нестандарт",
             "ready_date": "Дата готовности",
             "edge": "Кромка",
         }
         widths = {
             "date": 90, "order": 80, "part": 100,
             "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
-            "ready_date": 110, "edge": 70,
+            "nonstandard": 100, "ready_date": 110, "edge": 70,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1845,6 +1859,10 @@ class SketchExtractorApp:
                 "material": item.get("material") or "",
                 "description": item["description"],
                 "extra_sketch": item.get("extra_sketch") or "Нет",
+                # Пометка "НЕСТАНДАРТ" с эскиза — привязана к конкретному
+                # листу, а не к названию детали, поэтому "Нет" по умолчанию,
+                # а не только когда деталь не найдена в списках выше.
+                "nonstandard": "Нестандарт" if item.get("nonstandard") else "Нет",
                 # Код стандартной заготовки ("R061") или параметрической
                 # программы ("P004") вместо даты — единственное исключение из
                 # правила "программа никогда не пишет в Дата готовности",
@@ -1869,7 +1887,7 @@ class SketchExtractorApp:
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["ready_date"], row["edge"],
+                row["nonstandard"], row["ready_date"], row["edge"],
             ), tags=("excluded",) if auto_exclude else ())
             self.current_rows.append(row)
 
@@ -1886,11 +1904,11 @@ class SketchExtractorApp:
             if not row["include"]:
                 continue
             # B=дата запуска, C=заказ, D=деталь, E=описание, F=материал,
-            # G=источник, H=доп. эскиз, I=дата готовности, J=кромка.
+            # G=источник, H=доп. эскиз, I=нестандарт, J=дата готовности, K=кромка.
             row_values.append([
                 date_start, row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["ready_date"], row["edge"],
+                row["nonstandard"], row["ready_date"], row["edge"],
             ])
 
         if not row_values:
