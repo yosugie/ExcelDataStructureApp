@@ -815,6 +815,15 @@ def parse_pdf_sketches(pdf_path):
     results = []
     order_votes = {}
 
+    # PARAMETRIC_PROGRAMS подобран под детали корпусной мебели ("Запуск
+    # корпус_ДД.ММ.ГГГГ.pdf") — в "Запуск Прочее_ДД.ММ.ГГГГ.pdf" встречаются
+    # детали с ТЕМИ ЖЕ названиями (например "Бок левый"/"Бок правый"), но
+    # физически другие, без готовой заготовленной программы под них. Поэтому
+    # подстановку кода по имени применяем только для "корпус" — и по тому же
+    # дефолту, что и в _fill_results/detect_pdf_source_type, если по имени
+    # файла источник вообще не определился (там тоже по умолчанию "inSight").
+    is_other_source = detect_pdf_source_type(os.path.basename(pdf_path)) == "inSight (Базис)"
+
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
             text = page.extract_text() or ""
@@ -832,7 +841,9 @@ def parse_pdf_sketches(pdf_path):
             blank_code = extract_standard_blank_code(text)
             is_bad_diagonal = is_unmachinable_diagonal_cut(text)
             is_glass = is_glass_material(material)
-            program_code, program_edge = lookup_parametric_program(part_name)
+            program_code, program_edge = (
+                (None, None) if is_other_source else lookup_parametric_program(part_name)
+            )
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
