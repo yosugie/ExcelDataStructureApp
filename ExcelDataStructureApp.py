@@ -1091,6 +1091,89 @@ class CopySelectionDialog(ctk.CTkToplevel):
         self._build_checklist(counts, checked_state)
 
 
+class ColumnSelectionDialog(ctk.CTkToplevel):
+    """Список столбцов таблицы с галочками — какие столбцы попадают в буфер
+    при копировании (см. SketchExtractorApp.copy_for_table). Не путать с
+    "Что копировать": тот диалог решает, какие СТРОКИ (виды деталей)
+    копируются, этот — какие СТОЛБЦЫ. Порядок в списке — фиксированный,
+    тот же, что и в самой таблице (столбцы это позиции, а не виды, сортировать
+    отмеченные наверх смысла не имеет). По умолчанию отмечены все; "Отметить
+    всё"/"Снять всё" меняют разом, "Готово" просто закрывает окно —
+    изменения и так применяются сразу по клику на галочку."""
+
+    def __init__(self, master, colors, icon_images, theme, columns, headers, checked_state, on_toggle, on_clear_all, on_check_all):
+        super().__init__(master)
+        self.title("Столбцы для копирования")
+        self.resizable(False, False)
+        self.configure(fg_color=colors["bg"])
+        self.transient(master)
+        _apply_window_icon(self, icon_images, theme)
+        set_windows_dark_titlebar(self, dark=(theme == "dark"))
+
+        self._colors = colors
+        self._on_toggle = on_toggle
+
+        self._content = ctk.CTkFrame(
+            self, fg_color=colors["card"], corner_radius=16,
+            border_width=1, border_color=colors["border"],
+        )
+        self._content.grid(row=0, column=0, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            self._content, text="Отметьте столбцы, которые нужно копировать в буфер:",
+            text_color=colors["text"], wraplength=320, justify="left",
+        ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
+
+        self._scroll = ctk.CTkScrollableFrame(
+            self._content, width=320, height=280, corner_radius=12,
+            fg_color=colors["input"], scrollbar_button_color=colors["border"],
+            scrollbar_button_hover_color=colors["muted"],
+        )
+        self._scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
+        self._build_checklist(columns, headers, checked_state)
+
+        btn_row = ctk.CTkFrame(self._content, fg_color=colors["card"])
+        btn_row.grid(row=2, column=0, pady=(0, 20))
+
+        ctk.CTkButton(
+            btn_row, text="Отметить всё", command=on_check_all, width=110, height=32,
+            corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
+            text_color=colors["text"], border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="Снять всё", command=on_clear_all, width=100, height=32,
+            corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
+            text_color=colors["text"], border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="Готово", command=self.destroy, width=100, height=32,
+            corner_radius=20, fg_color=colors["accent"],
+            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
+        ).pack(side="left")
+
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+
+    def _build_checklist(self, columns, headers, checked_state):
+        colors = self._colors
+        for col in columns:
+            var = tk.BooleanVar(value=checked_state.get(col, True))
+            ctk.CTkCheckBox(
+                self._scroll, text=headers[col], variable=var,
+                text_color=colors["text"], fg_color=colors["accent"],
+                hover_color=colors["accent_hover"], border_color=colors["border"],
+                command=lambda c=col, v=var: self._on_toggle(c, v.get()),
+            ).pack(anchor="w", pady=4, padx=4)
+
+    def refresh(self, columns, headers, checked_state):
+        for child in self._scroll.winfo_children():
+            child.destroy()
+        self._build_checklist(columns, headers, checked_state)
+
+
 class SketchExtractorApp:
     def __init__(self, root):
         self.root = root
@@ -1129,6 +1212,13 @@ class SketchExtractorApp:
         # "auto_exclude" конкретной строки (см. _apply_row_styling).
         self.group_overrides = {}
         self._copy_selection_dialog = None
+        # Столбцы для копирования (см. "Столбцы для копирования" в
+        # интерфейсе) — {имя_столбца: копировать_ли}, по умолчанию все
+        # включены. В отличие от group_overrides выше, это не про конкретный
+        # файл, а про структуру Excel-таблицы пользователя — не сбрасывается
+        # при новом разборе (см. run_parse) и при "Очистить".
+        self.column_selection = {c: True for c in self.columns}
+        self._column_selection_dialog = None
         # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
         self._parse_thread = None
         self._parse_queue = None
@@ -1234,6 +1324,13 @@ class SketchExtractorApp:
         self.copy_selection_btn.pack(side="right")
         self._reg(self.copy_selection_btn, "secondary_button")
 
+        self.column_selection_btn = ctk.CTkButton(
+            date_row, text="Столбцы для копирования", command=self.open_column_selection_dialog,
+            height=32, width=200, corner_radius=20,
+        )
+        self.column_selection_btn.pack(side="right", padx=(0, 8))
+        self._reg(self.column_selection_btn, "secondary_button")
+
     def _build_status(self, root, t):
         """Строка состояния под карточкой."""
         self.status_var = tk.StringVar(value="")
@@ -1250,11 +1347,10 @@ class SketchExtractorApp:
 
         columns = (
             "date", "order", "part", "description", "material",
-            "type", "extra_sketch", "nonstandard", "ready_date", "edge",
+            "type", "extra_sketch", "ready_date", "nonstandard", "edge",
         )
         self.columns = columns
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
-        headers = {
+        self.column_headers = headers = {
             "date": "Дата запуска",
             "order": "№ заказа",
             "part": "№ детали",
@@ -1262,14 +1358,15 @@ class SketchExtractorApp:
             "material": "Материал",
             "type": "Источник",
             "extra_sketch": "Доп. эскиз",
-            "nonstandard": "Нестандарт",
             "ready_date": "Дата готовности",
+            "nonstandard": "Нестандарт",
             "edge": "Кромка",
         }
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
         widths = {
             "date": 90, "order": 80, "part": 100,
             "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
-            "nonstandard": 100, "ready_date": 110, "edge": 70,
+            "ready_date": 110, "nonstandard": 100, "edge": 70,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1593,6 +1690,33 @@ class SketchExtractorApp:
             row["include"] = included
             self.tree.item(iid, tags=() if included else ("excluded",))
 
+    def open_column_selection_dialog(self):
+        # Не завязан на self.current_rows (в отличие от "Что копировать") —
+        # список столбцов фиксированный, а не зависит от того, что нашлось
+        # при разборе, так что можно настроить и до первого файла.
+        self._column_selection_dialog = ColumnSelectionDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            self.columns, self.column_headers, self.column_selection,
+            self.toggle_column_copying, self.clear_all_columns, self.check_all_columns,
+        )
+
+    def _refresh_column_selection_dialog(self):
+        if self._column_selection_dialog is not None and self._column_selection_dialog.winfo_exists():
+            self._column_selection_dialog.refresh(self.columns, self.column_headers, self.column_selection)
+
+    def toggle_column_copying(self, column, is_included):
+        self.column_selection[column] = is_included
+
+    def clear_all_columns(self):
+        for c in self.columns:
+            self.column_selection[c] = False
+        self._refresh_column_selection_dialog()
+
+    def check_all_columns(self):
+        for c in self.columns:
+            self.column_selection[c] = True
+        self._refresh_column_selection_dialog()
+
     def log(self, message):
         tag = "warn" if message.startswith("⚠") else "success"
         self.log_text.configure(state="normal")
@@ -1861,8 +1985,13 @@ class SketchExtractorApp:
                 "extra_sketch": item.get("extra_sketch") or "Нет",
                 # Пометка "НЕСТАНДАРТ" с эскиза — привязана к конкретному
                 # листу, а не к названию детали, поэтому "Нет" по умолчанию,
-                # а не только когда деталь не найдена в списках выше.
-                "nonstandard": "Нестандарт" if item.get("nonstandard") else "Нет",
+                # а не только когда деталь не найдена в списках выше. У .bln
+                # такой пометки не бывает вовсе (не читается из документа, а
+                # не просто "не нашлась") — там прочерк, как и в "Кромка".
+                "nonstandard": (
+                    "-" if kind == "bazis"
+                    else "Нестандарт" if item.get("nonstandard") else "Нет"
+                ),
                 # Код стандартной заготовки ("R061") или параметрической
                 # программы ("P004") вместо даты — единственное исключение из
                 # правила "программа никогда не пишет в Дата готовности",
@@ -1887,7 +2016,7 @@ class SketchExtractorApp:
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
                 row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["nonstandard"], row["ready_date"], row["edge"],
+                row["ready_date"], row["nonstandard"], row["edge"],
             ), tags=("excluded",) if auto_exclude else ())
             self.current_rows.append(row)
 
@@ -1898,18 +2027,27 @@ class SketchExtractorApp:
         if not self.current_rows:
             self.show_message("Нечего копировать", "Сначала разберите файл.")
             return
+
+        # Какие столбцы вообще копируем — см. "Столбцы для копирования"
+        # (self.column_selection), отдельно от того, какие СТРОКИ копируем
+        # (row["include"], см. "Что копировать" выше). Порядок столбцов в
+        # буфере — тот же, что и в самой таблице (self.columns), просто с
+        # пропуском снятых.
+        selected_columns = [c for c in self.columns if self.column_selection.get(c, True)]
+        if not selected_columns:
+            self.show_message(
+                "Нечего копировать",
+                'Не отмечено ни одного столбца — отметьте нужные в "Столбцы для копирования".',
+            )
+            return
+
         date_start = self.date_var.get().strip()
         row_values = []
         for row in self.current_rows:
             if not row["include"]:
                 continue
-            # B=дата запуска, C=заказ, D=деталь, E=описание, F=материал,
-            # G=источник, H=доп. эскиз, I=нестандарт, J=дата готовности, K=кромка.
-            row_values.append([
-                date_start, row["order"], row["part"],
-                row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["nonstandard"], row["ready_date"], row["edge"],
-            ])
+            row_for_copy = dict(row, date=date_start)
+            row_values.append([row_for_copy[c] for c in selected_columns])
 
         if not row_values:
             self.show_message(
