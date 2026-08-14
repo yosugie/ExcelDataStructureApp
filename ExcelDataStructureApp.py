@@ -692,22 +692,43 @@ def extract_standard_blank_code(text):
 # по данным эскиза не понять — тогда в ячейку пишутся оба кода через "/",
 # и пользователь выбирает нужный сам.
 #
+# Третий элемент (необязательный) — "корпус": подстановка работает только
+# для "Запуск корпус_ДД.ММ.ГГГГ.pdf" (и когда источник вообще не
+# определился по имени файла). Только "Бок левый"/"Бок правый"/"Заглушка
+# проходная" сюда помечены — под этими же названиями в "Запуск
+# Прочее_ДД.ММ.ГГГГ.pdf" бывает физически другая деталь без готовой
+# программы (подтверждено на реальном файле пользователя). У остальных
+# записей такой путаницы не подтверждено — наоборот, "Задняя стенка в Паз
+# ЛДСП"/"Н_бок"/"Гор. щит врезная вытяжка" встречаются именно в "Прочее" и
+# должны получать код там тоже, так что для них подстановка работает
+# независимо от источника.
+#
 # Только для inSight (.pdf) — в Базисе (.bln) не применяется.
 PARAMETRIC_PROGRAMS = {
     "горизонтальный щит mb": ("P010", "Есть"),
     "задняя стенка в паз лдсп": ("P002", "Нет"),
+    "гор. щит врезная вытяжка": ("P005", "Нет"),
+    "н_бок": ("P003", "Нет"),
     # Одна и та же программа P004 подходит сразу трём разным деталям.
-    "бок левый": ("P004", "Нет"),
-    "бок правый": ("P004", "Нет"),
-    "заглушка проходная": ("P004", "Нет"),
+    "бок левый": ("P004", "Нет", "корпус"),
+    "бок правый": ("P004", "Нет", "корпус"),
+    "заглушка проходная": ("P004", "Нет", "корпус"),
     "гор.щит 2кр забивной профиль": ("P001/P006", "Нет"),
 }
 
 
-def lookup_parametric_program(description):
-    """Возвращает (код_программы, кромка) или (None, None)."""
+def lookup_parametric_program(description, source_type):
+    """Возвращает (код_программы, кромка) или (None, None). source_type —
+    результат detect_pdf_source_type(), для записей, помеченных "корпус"
+    выше (см. комментарий там)."""
     key = (description or "").strip().lower()
-    return PARAMETRIC_PROGRAMS.get(key, (None, None))
+    entry = PARAMETRIC_PROGRAMS.get(key)
+    if entry is None:
+        return None, None
+    code, edge, *scope = entry
+    if scope and scope[0] == "корпус" and source_type == "inSight (Базис)":
+        return None, None
+    return code, edge
 
 # Материал с толщиной в тексте PDF, например:
 # "0 ЭР35521 ЛДСП 16 Кашемир U702 СТ9 2800х2070 ..." -> "ЛДСП 16 Кашемир U702 СТ9"
@@ -826,14 +847,9 @@ def parse_pdf_sketches(pdf_path):
     results = []
     order_votes = {}
 
-    # PARAMETRIC_PROGRAMS подобран под детали корпусной мебели ("Запуск
-    # корпус_ДД.ММ.ГГГГ.pdf") — в "Запуск Прочее_ДД.ММ.ГГГГ.pdf" встречаются
-    # детали с ТЕМИ ЖЕ названиями (например "Бок левый"/"Бок правый"), но
-    # физически другие, без готовой заготовленной программы под них. Поэтому
-    # подстановку кода по имени применяем только для "корпус" — и по тому же
-    # дефолту, что и в _fill_results/detect_pdf_source_type, если по имени
-    # файла источник вообще не определился (там тоже по умолчанию "inSight").
-    is_other_source = detect_pdf_source_type(os.path.basename(pdf_path)) == "inSight (Базис)"
+    # Источник по имени файла — часть записей PARAMETRIC_PROGRAMS (см. там)
+    # подставляется только для "корпус", остальные независимо от источника.
+    source_type = detect_pdf_source_type(os.path.basename(pdf_path))
 
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
@@ -853,9 +869,7 @@ def parse_pdf_sketches(pdf_path):
             blank_code = extract_standard_blank_code(text)
             is_bad_diagonal = is_unmachinable_diagonal_cut(text)
             is_glass = is_glass_material(material)
-            program_code, program_edge = (
-                (None, None) if is_other_source else lookup_parametric_program(part_name)
-            )
+            program_code, program_edge = lookup_parametric_program(part_name, source_type)
 
             if order:
                 order_votes[order] = order_votes.get(order, 0) + 1
