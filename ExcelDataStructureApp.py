@@ -424,6 +424,14 @@ NOT_MACHINABLE_PART_NAMES = {
     "гор. щит конц. 1дв.2 кр. лев.",
     "полка концевая",
     "гор. щит угловой диаг.",
+    # "45" тут — не как в "Щит задний диаг. 2 скоса" (там срез отбрасывался
+    # из имени, и без отдельной проверки текста страницы 45°/90° было не
+    # различить): этот угол только один, программе он не встречался без
+    # "45", а extract_part_name_pdf() отбрасывает число прямо перед
+    # размерами (как "2" в "Панель под рейки 2 267.0*") — так что "45" тоже
+    # может пропасть из названия. На всякий случай оставлены оба варианта.
+    "бок угловой 1 скос",
+    "бок угловой 1 скос 45",
 }
 
 
@@ -1361,7 +1369,7 @@ class SketchExtractorApp:
 
         columns = (
             "date", "order", "part", "description", "material",
-            "type", "extra_sketch", "ready_date", "nonstandard", "edge",
+            "type", "nonstandard", "extra_sketch", "edge", "ready_date",
         )
         self.columns = columns
         self.column_headers = headers = {
@@ -1371,16 +1379,16 @@ class SketchExtractorApp:
             "description": "Описание",
             "material": "Материал",
             "type": "Источник",
-            "extra_sketch": "Доп. эскиз",
-            "ready_date": "Дата готовности",
             "nonstandard": "Нестандарт",
+            "extra_sketch": "Доп. эскиз",
             "edge": "Кромка",
+            "ready_date": "Дата готовности",
         }
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
         widths = {
             "date": 90, "order": 80, "part": 100,
-            "description": 220, "material": 260, "type": 100, "extra_sketch": 150,
-            "ready_date": 110, "nonstandard": 100, "edge": 70,
+            "description": 220, "material": 260, "type": 100, "nonstandard": 100,
+            "extra_sketch": 150, "edge": 70, "ready_date": 110,
         }
         for c in columns:
             self.tree.heading(c, text=headers[c], anchor="center")
@@ -1996,14 +2004,13 @@ class SketchExtractorApp:
                 "type": row_type,
                 "material": item.get("material") or "",
                 "description": item["description"],
-                "extra_sketch": item.get("extra_sketch") or "Нет",
+                # "Нет"/пометка не найдена — прочерк "-", тот же принцип, что
+                # и у "Кромка" ниже: пользователь заполняет сам, где нужно.
+                "extra_sketch": item.get("extra_sketch") or "-",
                 # Пометка "НЕСТАНДАРТ" с эскиза — привязана к конкретному
-                # листу, а не к названию детали, поэтому "Нет" по умолчанию,
-                # а не только когда деталь не найдена в списках выше. Для
-                # .bln такой пометки не бывает вовсе — там тоже всегда "Нет"
-                # (в отличие от "Кромка", где прочерк — это то, что выбирает
-                # сам пользователь; здесь выбирать нечего, ответ всегда один).
-                "nonstandard": "Нестандарт" if item.get("nonstandard") else "Нет",
+                # листу, а не к названию детали. Не найдена (или для .bln,
+                # где её вообще не бывает) — тоже прочерк "-".
+                "nonstandard": "Нестандарт" if item.get("nonstandard") else "-",
                 # Код стандартной заготовки ("R061") или параметрической
                 # программы ("P004") вместо даты — единственное исключение из
                 # правила "программа никогда не пишет в Дата готовности",
@@ -2027,8 +2034,8 @@ class SketchExtractorApp:
             }
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
-                row["description"], row["material"], row["type"], row["extra_sketch"],
-                row["ready_date"], row["nonstandard"], row["edge"],
+                row["description"], row["material"], row["type"], row["nonstandard"],
+                row["extra_sketch"], row["edge"], row["ready_date"],
             ), tags=("excluded",) if auto_exclude else ())
             self.current_rows.append(row)
 
