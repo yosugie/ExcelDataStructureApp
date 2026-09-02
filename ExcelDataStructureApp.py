@@ -674,8 +674,9 @@ def find_order_bln_files(day_dir):
     Сама выбранная папка тоже просматривается — на случай, если выбрали не
     папку дня, а сразу папку одного заказа.
 
-    Возвращает ([(имя_папки_заказа, путь_к_bln), ...], warnings); порядок —
-    по имени папки, то есть по номеру заказа.
+    Возвращает ([(имя_папки_заказа, путь_к_bln), ...], warnings, stats);
+    порядок — по имени папки, то есть по номеру заказа. stats нужен для
+    итогового окна после разбора (см. parse_bln_folder).
     """
     try:
         entries = sorted(os.listdir(day_dir))
@@ -706,15 +707,25 @@ def find_order_bln_files(day_dir):
 
     warnings = []
     if empty_dirs:
-        shown = ", ".join(empty_dirs[:10])
-        more = f" и ещё {len(empty_dirs) - 10}" if len(empty_dirs) > 10 else ""
-        warnings.append(f"Папки без файла .bln (пропущены): {shown}{more}.")
+        warnings.append(
+            f"Файла .bln нет в {len(empty_dirs)} заказах (пропущены): "
+            f"{', '.join(empty_dirs)}."
+        )
     if multi_dirs:
         warnings.append(
             f"В этих папках заказов больше одного .bln — разобраны все: "
             f"{', '.join(multi_dirs)}."
         )
-    return found, warnings
+    # Папки и файлы считаем отдельно: в одной папке заказа может лежать
+    # несколько .bln, и тогда файлов больше, чем заказов.
+    dirs_with_bln = len({name for name, _ in found})
+    stats = {
+        "order_dirs": len(empty_dirs) + dirs_with_bln,
+        "dirs_with_bln": dirs_with_bln,
+        "dirs_without_bln": len(empty_dirs),
+        "bln_files": len(found),
+    }
+    return found, warnings, stats
 
 
 def parse_bln_folder(day_dir, progress=None):
@@ -733,17 +744,18 @@ def parse_bln_folder(day_dir, progress=None):
     Одна битая библиотека не роняет весь разбор — она попадает в
     предупреждения, а остальные заказы разбираются дальше.
 
-    Возвращает (None, results, warnings) — тот же формат, что и у
-    parse_bln_sketches, только общего номера заказа нет: он свой в каждой
-    строке.
+    Возвращает (None, results, warnings, stats) — как parse_bln_sketches,
+    только общего номера заказа нет (он свой в каждой строке), плюс stats
+    для итогового окна после разбора (см. _show_folder_summary).
     """
-    files, warnings = find_order_bln_files(day_dir)
+    files, warnings, stats = find_order_bln_files(day_dir)
+    stats.update(parsed_ok=0, failed=0, failed_orders=[], orders_with_sketches=0, sketches=0)
     if not files:
         warnings.append(
             "В выбранной папке не нашлось ни одного файла .bln. Нужна папка дня, "
             "внутри которой лежат папки заказов, а в них — файлы .bln."
         )
-        return None, [], warnings
+        return None, [], warnings, stats
 
     results = []
     total = len(files)
@@ -753,10 +765,13 @@ def parse_bln_folder(day_dir, progress=None):
         try:
             file_order, file_results, file_warnings = parse_bln_sketches(path)
         except Exception as e:  # noqa: BLE001 — текст ошибки покажем пользователю
+            stats["failed"] += 1
+            stats["failed_orders"].append(order_dir_name)
             warnings.append(
-                f"{order_dir_name}: не удалось разобрать {os.path.basename(path)} — {e}"
+                f"{order_dir_name}: не удалось прочесть файл {os.path.basename(path)} — {e}"
             )
             continue
+        stats["parsed_ok"] += 1
         for row in file_results:
             row["order_from_content"] = (
                 row["order_from_content"] or file_order or order_dir_name
@@ -766,7 +781,11 @@ def parse_bln_folder(day_dir, progress=None):
         # общей куче непонятно, к какому из них они относятся.
         warnings.extend(f"{order_dir_name}: {w}" for w in file_warnings)
 
-    return None, results, warnings
+    # "Разобрано заказов" считаем по строкам: заказ, где эскизов не нашлось,
+    # прочитан, но в таблицу ничего не дал — это разные вещи.
+    stats["orders_with_sketches"] = len({r["order_from_content"] for r in results if r["order_from_content"]})
+    stats["sketches"] = len(results)
+    return None, results, warnings, stats
 
 
 # ---------------------------------------------------------------------------
@@ -1095,7 +1114,9 @@ class MessageDialog(ctk.CTkToplevel):
     светлый). Только текст + кнопка OK, без иконки-бейджа (кружок с "✕"/"i"
     пробовали — выглядело как лишняя некрасивая кнопка, убрали)."""
 
-    def __init__(self, master, colors, icon_images, theme, title, message):
+    def __init__(self, master, colors, icon_images, theme, title, message, justify="center"):
+        # justify="left" — для многострочных сводок (итог разбора папки дня):
+        # по центру такой столбик цифр читается плохо.
         super().__init__(master)
         self.title(title)
         self.resizable(False, False)
@@ -1112,8 +1133,9 @@ class MessageDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             content, text=message, text_color=colors["text"],
-            wraplength=360, justify="center",
-        ).grid(row=0, column=0, padx=32, pady=(28, 16))
+            wraplength=360, justify=justify,
+            anchor="w" if justify == "left" else "center",
+        ).grid(row=0, column=0, padx=32, pady=(28, 16), sticky="w" if justify == "left" else "")
 
         ctk.CTkButton(
             content, text="OK", command=self.destroy, width=110, height=32,
@@ -1234,62 +1256,61 @@ class CopySelectionDialog(ctk.CTkToplevel):
         self._build_checklist(counts, checked_state)
 
 
-class ColumnSelectionDialog(ctk.CTkToplevel):
-    """Список столбцов таблицы с галочками — какие столбцы попадают в буфер
-    при копировании (см. SketchExtractorApp.copy_for_table). Не путать с
-    "Что копировать": тот диалог решает, какие СТРОКИ (виды деталей)
-    копируются, этот — какие СТОЛБЦЫ. Порядок в списке — фиксированный,
-    тот же, что и в самой таблице (столбцы это позиции, а не виды, сортировать
-    отмеченные наверх смысла не имеет). По умолчанию отмечены все; "Отметить
-    всё"/"Снять всё" меняют разом, "Готово" просто закрывает окно —
-    изменения и так применяются сразу по клику на галочку."""
+class LogDialog(ctk.CTkToplevel):
+    """Журнал разбора отдельным окном (кнопка "Логи" под таблицей). Раньше
+    журнал был сворачиваемой карточкой прямо в окне — от неё отказались,
+    чтобы не занимать место под таблицей: смотреть туда нужно редко, а
+    итог разбора и так показывается сразу после него отдельным окном.
 
-    def __init__(self, master, colors, icon_images, theme, columns, headers, checked_state, on_toggle, on_clear_all, on_check_all):
+    Текст моноширинный и выделяемый мышью, строки красятся по смыслу
+    (предупреждения — красным, итоги — зелёным), плюс кнопка "Скопировать
+    логи": удобнее, чем выделять руками, если надо переслать."""
+
+    def __init__(self, master, colors, icon_images, theme, lines, on_copy):
         super().__init__(master)
-        self.title("Столбцы для копирования")
-        self.resizable(False, False)
+        self.title("Логи")
         self.configure(fg_color=colors["bg"])
         self.transient(master)
         _apply_window_icon(self, icon_images, theme)
         set_windows_dark_titlebar(self, dark=(theme == "dark"))
 
-        self._colors = colors
-        self._on_toggle = on_toggle
-
-        self._content = ctk.CTkFrame(
+        content = ctk.CTkFrame(
             self, fg_color=colors["card"], corner_radius=16,
             border_width=1, border_color=colors["border"],
         )
-        self._content.grid(row=0, column=0, padx=16, pady=16)
+        content.pack(fill="both", expand=True, padx=16, pady=16)
 
-        ctk.CTkLabel(
-            self._content, text="Отметьте столбцы, которые нужно копировать в буфер:",
-            text_color=colors["text"], wraplength=320, justify="left",
-        ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
-
-        self._scroll = ctk.CTkScrollableFrame(
-            self._content, width=320, height=280, corner_radius=12,
-            fg_color=colors["input"], scrollbar_button_color=colors["border"],
+        box = ctk.CTkTextbox(
+            content, width=760, height=380, corner_radius=12, border_width=1,
+            font=("Consolas", 12), fg_color=colors["input"],
+            border_color=colors["border"], text_color=colors["text"],
+            scrollbar_button_color=colors["border"],
             scrollbar_button_hover_color=colors["muted"],
         )
-        self._scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
-        self._build_checklist(columns, headers, checked_state)
+        box.pack(fill="both", expand=True, padx=20, pady=(20, 12))
+        box.tag_config("warn", foreground=ERROR_COLOR)
+        box.tag_config("success", foreground=SUCCESS_COLOR)
+        if lines:
+            for i, line in enumerate(lines):
+                tag = "warn" if line.startswith("\u26a0") else "success"
+                box.insert(tk.END, ("\n" if i else "") + line, tag)
+        else:
+            box.insert(tk.END, "Пока пусто — здесь появятся замечания по разбору.")
+        box.configure(state="disabled")
+        fix_clipboard_shortcuts(box)
 
-        btn_row = ctk.CTkFrame(self._content, fg_color=colors["card"])
-        btn_row.grid(row=2, column=0, pady=(0, 20))
+        btn_row = ctk.CTkFrame(content, fg_color=colors["card"])
+        btn_row.pack(pady=(0, 20))
 
+        self._copy_btn = ctk.CTkButton(
+            btn_row, text="Скопировать логи", command=lambda: self._copy(on_copy),
+            width=170, height=32, corner_radius=20, fg_color=colors["card"],
+            hover_color=colors["input"], text_color=colors["text"],
+            border_width=1, border_color=colors["border"],
+        )
+        self._copy_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(
-            btn_row, text="Отметить всё", command=on_check_all, width=110, height=32,
-            corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
-            text_color=colors["text"], border_width=1, border_color=colors["border"],
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            btn_row, text="Снять всё", command=on_clear_all, width=100, height=32,
-            corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
-            text_color=colors["text"], border_width=1, border_color=colors["border"],
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            btn_row, text="Готово", command=self.destroy, width=100, height=32,
+            btn_row, text="Закрыть", command=self.destroy, width=110, height=32,
             corner_radius=20, fg_color=colors["accent"],
             hover_color=colors["accent_hover"], text_color=colors["accent_text"],
         ).pack(side="left")
@@ -1300,21 +1321,10 @@ class ColumnSelectionDialog(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
         self.grab_set()
 
-    def _build_checklist(self, columns, headers, checked_state):
-        colors = self._colors
-        for col in columns:
-            var = tk.BooleanVar(value=checked_state.get(col, True))
-            ctk.CTkCheckBox(
-                self._scroll, text=headers[col], variable=var,
-                text_color=colors["text"], fg_color=colors["accent"],
-                hover_color=colors["accent_hover"], border_color=colors["border"],
-                command=lambda c=col, v=var: self._on_toggle(c, v.get()),
-            ).pack(anchor="w", pady=4, padx=4)
-
-    def refresh(self, columns, headers, checked_state):
-        for child in self._scroll.winfo_children():
-            child.destroy()
-        self._build_checklist(columns, headers, checked_state)
+    def _copy(self, on_copy):
+        on_copy()
+        self._copy_btn.configure(text="Скопировано \u2713")
+        self.after(900, lambda: self._copy_btn.configure(text="Скопировать логи"))
 
 
 class SketchExtractorApp:
@@ -1337,6 +1347,11 @@ class SketchExtractorApp:
         self._themed = []
         t = THEMES[self.theme]  # стартовые цвета — тема "dark" по умолчанию
 
+        # Журнал разбора живёт просто списком строк, отдельного виджета под
+        # него в окне нет — показывается по кнопке "Логи" (см. LogDialog).
+        # Заводим ДО сборки интерфейса: _build_buttons рисует счётчик на кнопке.
+        self.log_lines = []
+
         # Интерфейс собирается по частям: каждый метод строит свой блок, а
         # порядок вызовов = порядок блоков в окне сверху вниз (виджеты
         # раскладываются через pack, так что порядок здесь важен).
@@ -1345,7 +1360,6 @@ class SketchExtractorApp:
         self._build_status(root, t)
         self._build_table(root, t)
         self._build_buttons(root, t)
-        self._build_log(root, t)
 
         self.current_rows = []  # список dict-ов с результатами разбора
         self.current_kind = None  # "bazis" или "pdf"
@@ -1355,13 +1369,13 @@ class SketchExtractorApp:
         # "auto_exclude" конкретной строки (см. _apply_row_styling).
         self.group_overrides = {}
         self._copy_selection_dialog = None
-        # Столбцы для копирования (см. "Столбцы для копирования" в
-        # интерфейсе) — {имя_столбца: копировать_ли}, по умолчанию все
-        # включены. В отличие от group_overrides выше, это не про конкретный
-        # файл, а про структуру Excel-таблицы пользователя — не сбрасывается
-        # при новом разборе (см. run_parse) и при "Очистить".
+        # Столбцы для копирования — {имя_столбца: копировать_ли}, по умолчанию
+        # все включены; отмечаются галочками прямо в шапке таблицы (см.
+        # _refresh_column_headers). В отличие от group_overrides выше, это не
+        # про конкретный файл, а про структуру Excel-таблицы пользователя —
+        # не сбрасывается при новом разборе (см. run_parse) и при "Очистить".
         self.column_selection = {c: True for c in self.columns}
-        self._column_selection_dialog = None
+        self._refresh_column_headers()
         # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
         self._parse_thread = None
         self._parse_queue = None
@@ -1475,19 +1489,27 @@ class SketchExtractorApp:
         self.copy_selection_btn.pack(side="right")
         self._reg(self.copy_selection_btn, "secondary_button")
 
-        self.column_selection_btn = ctk.CTkButton(
-            date_row, text="Столбцы для копирования", command=self.open_column_selection_dialog,
-            height=32, width=200, corner_radius=20,
-        )
-        self.column_selection_btn.pack(side="right", padx=(0, 8))
-        self._reg(self.column_selection_btn, "secondary_button")
 
     def _build_status(self, root, t):
-        """Строка состояния под карточкой."""
+        """Строка состояния под карточкой + переключатель всех столбцов."""
+        status_row = ctk.CTkFrame(root, fg_color=t["bg"])
+        status_row.pack(fill="x", padx=16, pady=(4, 6))
+        self._reg(status_row, "plain_frame", surface="bg")
+
         self.status_var = tk.StringVar(value="")
-        self.status_label = ctk.CTkLabel(root, textvariable=self.status_var, anchor="w")
-        self.status_label.pack(fill="x", padx=16, pady=(4, 6))
+        self.status_label = ctk.CTkLabel(status_row, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(side="left")
         self._reg(self.status_label, "muted_label", surface="bg")
+
+        # Галочки столбцов ставятся в шапке таблицы, а разом снять/вернуть все
+        # удобнее одной кнопкой — она же и подсказывает, что галочки вообще
+        # есть. Текст меняется по текущему состоянию (см. _refresh_columns_btn).
+        self.columns_toggle_btn = ctk.CTkButton(
+            status_row, text="Снять все столбцы", command=self.toggle_all_columns,
+            height=26, width=180, corner_radius=20,
+        )
+        self.columns_toggle_btn.pack(side="right")
+        self._reg(self.columns_toggle_btn, "secondary_button", surface="bg")
 
     def _build_table(self, root, t):
         """Карточка с таблицей результатов и своими скроллбарами."""
@@ -1514,13 +1536,21 @@ class SketchExtractorApp:
             "ready_date": "Дата готовности",
         }
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=16)
+        # Ширины с запасом под галочку в шапке (см. _refresh_column_headers).
         widths = {
-            "date": 90, "order": 80, "part": 100,
-            "description": 220, "material": 260, "type": 100, "nonstandard": 100,
-            "extra_sketch": 150, "edge": 70, "ready_date": 110,
+            "date": 115, "order": 105, "part": 125,
+            "description": 235, "material": 275, "type": 125, "nonstandard": 125,
+            "extra_sketch": 165, "edge": 95, "ready_date": 140,
         }
         for c in columns:
-            self.tree.heading(c, text=headers[c], anchor="center")
+            # Клик по шапке = галочка "копировать этот столбец". Отдельной
+            # кнопки/диалога под это нет намеренно: галочка прямо над столбцом
+            # понятнее и не занимает места. Сортировки по клику у нас нет,
+            # так что команда шапки свободна.
+            self.tree.heading(
+                c, text=headers[c], anchor="center",
+                command=lambda col=c: self.toggle_column_copying(col),
+            )
             self.tree.column(c, width=widths[c], anchor="center")
 
         # Свои скроллбары (CTkScrollbar — толстый скруглённый акцентный
@@ -1626,34 +1656,14 @@ class SketchExtractorApp:
         self.clear_btn.pack(side="left", padx=(8, 0))
         self._reg(self.clear_btn, "secondary_button", surface="bg")
 
-    def _build_log(self, root, t):
-        """Карточка «Журнал» (сворачиваемая)."""
-        self.log_expanded = False
-        self.log_count = 0
-
-        log_card = ctk.CTkFrame(root, corner_radius=16, border_width=1, fg_color=t["card"], border_color=t["border"])
-        log_card.pack(fill="x", padx=8, pady=(0, 8))
-        self._reg(log_card, "card", surface="bg")
-
-        self.log_header_var = tk.StringVar(value="⌄ Журнал")
-        self.log_header = ctk.CTkLabel(
-            log_card, textvariable=self.log_header_var, anchor="w",
-            cursor="hand2", font=ctk.CTkFont(size=13, weight="bold"),
+        # Журнал — отдельным окном по кнопке справа (см. LogDialog): под
+        # таблицей он занимал место, а нужен редко.
+        self.log_btn = ctk.CTkButton(
+            btn_frame, text="Логи", command=self.open_log_dialog,
+            height=32, width=110, corner_radius=20,
         )
-        self.log_header.pack(fill="x", padx=16, pady=10)
-        self.log_header.bind("<Button-1>", lambda event: self.toggle_log())
-        self._reg(self.log_header, "label")
-
-        self.log_body = ctk.CTkFrame(log_card, fg_color=t["card"])
-        self._reg(self.log_body, "plain_frame")
-        self.log_text = ctk.CTkTextbox(self.log_body, height=120, corner_radius=16, border_width=1, font=("Consolas", 12))
-        self.log_text.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        self.log_text.tag_config("warn", foreground=ERROR_COLOR)
-        self.log_text.tag_config("success", foreground=SUCCESS_COLOR)
-        self.log_text.configure(state="disabled")
-        fix_clipboard_shortcuts(self.log_text)
-        self._reg(self.log_text, "textbox")
-        # log_body остаётся не упакованным — журнал стартует свёрнутым.
+        self.log_btn.pack(side="right")
+        self._reg(self.log_btn, "secondary_button", surface="bg")
 
     def _reg(self, widget, kind, surface="card"):
         # surface — какой фон стоит НЕПОСРЕДСТВЕННО за виджетом ("bg" — фон
@@ -1664,16 +1674,23 @@ class SketchExtractorApp:
         self._themed.append((widget, kind, surface))
         return widget
 
-    def toggle_log(self, expanded=None):
-        self.log_expanded = (not self.log_expanded) if expanded is None else expanded
-        if self.log_expanded:
-            self.log_body.pack(fill="both", expand=True, pady=(0, 4))
-            arrow = "⌃"  # раскрыто — клик свернёт
-        else:
-            self.log_body.pack_forget()
-            arrow = "⌄"  # свёрнуто — клик раскроет
-        suffix = f" ({self.log_count})" if self.log_count else ""
-        self.log_header_var.set(f"{arrow} Журнал{suffix}")
+    def open_log_dialog(self):
+        LogDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            self.log_lines, self.copy_log_to_clipboard,
+        )
+
+    def copy_log_to_clipboard(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(self.log_lines))
+
+    def clear_log(self):
+        self.log_lines = []
+        self._refresh_log_btn()
+
+    def _refresh_log_btn(self):
+        n = len(self.log_lines)
+        self.log_btn.configure(text=f"Логи ({n})" if n else "Логи")
 
     def toggle_theme(self):
         self.theme = "light" if self.theme == "dark" else "dark"
@@ -1716,12 +1733,6 @@ class SketchExtractorApp:
                 widget.configure(
                     fg_color=t["card"], hover_color=t["input"], text_color=t["text"],
                     border_width=1, border_color=t["border"], bg_color=surface_color,
-                )
-            elif kind == "textbox":
-                widget.configure(
-                    fg_color=t["card"], border_color=t["border"], text_color=t["text"],
-                    scrollbar_button_color=t["border"], scrollbar_button_hover_color=t["muted"],
-                    bg_color=surface_color,
                 )
             elif kind == "scrollbar":
                 widget.configure(fg_color=t["bg"], button_color=t["accent"], button_hover_color=t["accent_hover"], bg_color=surface_color)
@@ -1771,8 +1782,11 @@ class SketchExtractorApp:
         next_idx = (frame_idx + 1) % len(LOADING_SPINNER_FRAMES)
         self._loading_after_id = self.root.after(150, lambda: self._animate_loading_spinner(next_idx))
 
-    def show_message(self, title, message):
-        MessageDialog(self.root, THEMES[self.theme], self._icon_imgs, self.theme, title, message)
+    def show_message(self, title, message, justify="center"):
+        MessageDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            title, message, justify=justify,
+        )
 
     @staticmethod
     def _row_group_key(row):
@@ -1841,45 +1855,32 @@ class SketchExtractorApp:
             row["include"] = included
             self.tree.item(iid, tags=() if included else ("excluded",))
 
-    def open_column_selection_dialog(self):
-        # Не завязан на self.current_rows (в отличие от "Что копировать") —
-        # список столбцов фиксированный, а не зависит от того, что нашлось
-        # при разборе, так что можно настроить и до первого файла.
-        self._column_selection_dialog = ColumnSelectionDialog(
-            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            self.columns, self.column_headers, self.column_selection,
-            self.toggle_column_copying, self.clear_all_columns, self.check_all_columns,
+    def toggle_column_copying(self, column):
+        """Клик по шапке столбца — снять/поставить галочку копирования."""
+        self.column_selection[column] = not self.column_selection.get(column, True)
+        self._refresh_column_headers()
+
+    def toggle_all_columns(self):
+        # Одна кнопка вместо пары "отметить всё"/"снять всё": если отмечены
+        # все — снимаем все, иначе отмечаем все.
+        all_on = all(self.column_selection.get(c, True) for c in self.columns)
+        for c in self.columns:
+            self.column_selection[c] = not all_on
+        self._refresh_column_headers()
+
+    def _refresh_column_headers(self):
+        """Рисует галочку в шапке каждого столбца и обновляет кнопку-переключатель."""
+        for c in self.columns:
+            mark = "☑" if self.column_selection.get(c, True) else "☐"
+            self.tree.heading(c, text=f"{mark} {self.column_headers[c]}")
+        all_on = all(self.column_selection.get(c, True) for c in self.columns)
+        self.columns_toggle_btn.configure(
+            text="Снять все столбцы" if all_on else "Отметить все столбцы"
         )
 
-    def _refresh_column_selection_dialog(self):
-        if self._column_selection_dialog is not None and self._column_selection_dialog.winfo_exists():
-            self._column_selection_dialog.refresh(self.columns, self.column_headers, self.column_selection)
-
-    def toggle_column_copying(self, column, is_included):
-        self.column_selection[column] = is_included
-
-    def clear_all_columns(self):
-        for c in self.columns:
-            self.column_selection[c] = False
-        self._refresh_column_selection_dialog()
-
-    def check_all_columns(self):
-        for c in self.columns:
-            self.column_selection[c] = True
-        self._refresh_column_selection_dialog()
-
     def log(self, message):
-        tag = "warn" if message.startswith("⚠") else "success"
-        self.log_text.configure(state="normal")
-        prefix = "\n" if self.log_text.get("1.0", "end-1c") else ""
-        self.log_text.insert(tk.END, prefix + message + "\n", tag)
-        self.log_text.see(tk.END)
-        self.log_text.configure(state="disabled")
-        self.log_count += 1
-        if message.startswith("⚠") and not self.log_expanded:
-            self.toggle_log(expanded=True)
-        else:
-            self.toggle_log(expanded=self.log_expanded)  # обновить счётчик в заголовке
+        self.log_lines.append(message)
+        self._refresh_log_btn()
 
     def set_today(self):
         self.date_var.set(datetime.date.today().strftime("%d.%m.%Y"))
@@ -1975,11 +1976,7 @@ class SketchExtractorApp:
         self._set_empty_state(False)
         self.type_var.set("")
         self.type_combo.configure(state="disabled")
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", tk.END)
-        self.log_text.configure(state="disabled")
-        self.log_count = 0
-        self.toggle_log(expanded=False)
+        self.clear_log()
         self.status_var.set("")
 
     def on_drop(self, event):
@@ -2070,11 +2067,7 @@ class SketchExtractorApp:
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
 
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", tk.END)
-        self.log_text.configure(state="disabled")
-        self.log_count = 0
-        self.toggle_log(expanded=False)
+        self.clear_log()
 
         self._parse_is_folder = is_folder
         if is_folder:
@@ -2095,7 +2088,9 @@ class SketchExtractorApp:
                     def progress(done, total, name):
                         self._parse_queue.put(("progress", (done, total, name)))
 
-                    self._parse_queue.put(("ok", parse_bln_folder(path, progress)))
+                    # У папки дня результат на элемент длиннее — со сводкой
+                    # для итогового окна, поэтому и статус свой.
+                    self._parse_queue.put(("ok_folder", parse_bln_folder(path, progress)))
                 else:
                     fn = parse_bln_sketches if kind == "bazis" else parse_pdf_sketches
                     self._parse_queue.put(("ok", fn(path)))
@@ -2136,7 +2131,41 @@ class SketchExtractorApp:
             self.show_message(title, str(payload))
             self.status_var.set("Ошибка при разборе файла.")
             return
+
+        if status == "ok_folder":
+            order_number, results, warnings, stats = payload
+            self._fill_results(kind, path, order_number, results, warnings)
+            self._show_folder_summary(path, stats)
+            return
         self._fill_results(kind, path, *payload)
+
+    def _show_folder_summary(self, day_dir, stats):
+        """Итог разбора папки дня отдельным окном — чтобы сразу было видно,
+        сколько заказов нашлось и сколько из них реально разобрано, не лазая
+        в логи."""
+        # Без выравнивания пробелами: шрифт диалога пропорциональный, столбик
+        # цифр всё равно не сойдётся, а лишние пробелы только мешают.
+        lines = [
+            f"Папка: {os.path.basename(os.path.normpath(day_dir))}",
+            "",
+            f"Папок заказов найдено: {stats.get('order_dirs', 0)}",
+            f"Из них с файлом .bln: {stats.get('dirs_with_bln', 0)}",
+            f"Заказов с эскизами: {stats.get('orders_with_sketches', 0)}",
+            f"Всего эскизов: {stats.get('sketches', 0)}",
+        ]
+        if stats.get("bln_files", 0) != stats.get("dirs_with_bln", 0):
+            lines.insert(4, f"Файлов .bln разобрано: {stats.get('bln_files', 0)}")
+
+        problems = []
+        if stats.get("dirs_without_bln"):
+            problems.append(f"без файла .bln: {stats['dirs_without_bln']}")
+        if stats.get("failed"):
+            problems.append(f"не удалось прочесть: {stats['failed']}")
+        if problems:
+            lines += ["", "Пропущено заказов — " + ", ".join(problems) + ".",
+                      'Подробности с номерами заказов — в кнопке "Логи".']
+
+        self.show_message("Разбор папки дня завершён", "\n".join(lines), justify="left")
 
     def _fill_results(self, kind, path, order_number, results, warnings):
         if kind == "bazis":
