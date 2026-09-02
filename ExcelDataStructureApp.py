@@ -655,6 +655,120 @@ def parse_bln_sketches(bln_path):
     return order_number, results, warnings
 
 
+def _bln_files_in(directory):
+    """Файлы .bln ПРЯМО в этой папке (без захода во вложенные)."""
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    paths = [os.path.join(directory, n) for n in names if n.lower().endswith(".bln")]
+    return [p for p in paths if os.path.isfile(p)]
+
+
+def find_order_bln_files(day_dir):
+    """Ищет .bln в папках заказов внутри папки дня.
+
+    Раскладка у пользователя: <папка дня>/<номер заказа>/<файл>.bln — нужный
+    файл лежит ПРЯМО в папке заказа. Во вложенные подпапки не заходим
+    намеренно: там лежит всякое постороннее, а нужный .bln там не бывает.
+    Сама выбранная папка тоже просматривается — на случай, если выбрали не
+    папку дня, а сразу папку одного заказа.
+
+    Возвращает ([(имя_папки_заказа, путь_к_bln), ...], warnings); порядок —
+    по имени папки, то есть по номеру заказа.
+    """
+    try:
+        entries = sorted(os.listdir(day_dir))
+    except OSError as e:
+        raise CfbReadError(f"Не удалось прочитать папку:\n{day_dir}\n\n{e}")
+
+    found = []
+    empty_dirs = []
+    multi_dirs = []
+
+    # Сначала — .bln в самой выбранной папке (выбрали папку одного заказа).
+    own_name = os.path.basename(os.path.normpath(day_dir))
+    for path in _bln_files_in(day_dir):
+        found.append((own_name, path))
+
+    for name in entries:
+        sub = os.path.join(day_dir, name)
+        if not os.path.isdir(sub):
+            continue
+        files = _bln_files_in(sub)
+        if not files:
+            empty_dirs.append(name)
+            continue
+        if len(files) > 1:
+            multi_dirs.append(name)
+        for path in files:
+            found.append((name, path))
+
+    warnings = []
+    if empty_dirs:
+        shown = ", ".join(empty_dirs[:10])
+        more = f" и ещё {len(empty_dirs) - 10}" if len(empty_dirs) > 10 else ""
+        warnings.append(f"Папки без файла .bln (пропущены): {shown}{more}.")
+    if multi_dirs:
+        warnings.append(
+            f"В этих папках заказов больше одного .bln — разобраны все: "
+            f"{', '.join(multi_dirs)}."
+        )
+    return found, warnings
+
+
+def parse_bln_folder(day_dir, progress=None):
+    """Разбирает все .bln из папок заказов внутри папки дня и склеивает
+    результат в один список строк — как будто это один большой заказ.
+
+    Номер заказа у КАЖДОЙ строки свой: сначала то, что найдено внутри самого
+    чертежа, потом номер по файлу .bln, потом имя папки заказа (папки у
+    пользователя названы номерами заказов, так что это надёжный запасной
+    вариант).
+
+    progress(готово, всего, имя_папки) — для строки состояния; вызывается из
+    рабочего потока, поэтому внутри него НЕЛЬЗЯ трогать виджеты (см.
+    run_parse: оттуда сообщения уходят в очередь, а не в интерфейс).
+
+    Одна битая библиотека не роняет весь разбор — она попадает в
+    предупреждения, а остальные заказы разбираются дальше.
+
+    Возвращает (None, results, warnings) — тот же формат, что и у
+    parse_bln_sketches, только общего номера заказа нет: он свой в каждой
+    строке.
+    """
+    files, warnings = find_order_bln_files(day_dir)
+    if not files:
+        warnings.append(
+            "В выбранной папке не нашлось ни одного файла .bln. Нужна папка дня, "
+            "внутри которой лежат папки заказов, а в них — файлы .bln."
+        )
+        return None, [], warnings
+
+    results = []
+    total = len(files)
+    for i, (order_dir_name, path) in enumerate(files, start=1):
+        if progress is not None:
+            progress(i, total, order_dir_name)
+        try:
+            file_order, file_results, file_warnings = parse_bln_sketches(path)
+        except Exception as e:  # noqa: BLE001 — текст ошибки покажем пользователю
+            warnings.append(
+                f"{order_dir_name}: не удалось разобрать {os.path.basename(path)} — {e}"
+            )
+            continue
+        for row in file_results:
+            row["order_from_content"] = (
+                row["order_from_content"] or file_order or order_dir_name
+            )
+        results.extend(file_results)
+        # Предупреждения каждого заказа — с номером заказа впереди, иначе в
+        # общей куче непонятно, к какому из них они относятся.
+        warnings.extend(f"{order_dir_name}: {w}" for w in file_warnings)
+
+    return None, results, warnings
+
+
 # ---------------------------------------------------------------------------
 # inSight: разбор PDF-эскизов
 # ---------------------------------------------------------------------------
@@ -1251,6 +1365,7 @@ class SketchExtractorApp:
         # Фоновый разбор файла (см. run_parse): поток + очередь для результата.
         self._parse_thread = None
         self._parse_queue = None
+        self._parse_is_folder = False  # разбирали папку дня пачкой, а не один файл
         self._loading_after_id = None  # id тика анимации спиннера (см. _set_loading_state)
 
         self.apply_theme()
@@ -1289,7 +1404,7 @@ class SketchExtractorApp:
         file_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         file_row.pack(fill="x", padx=16, pady=4)
         self._reg(file_row, "plain_frame")
-        file_label = ctk.CTkLabel(file_row, text="Файл (.bln или .pdf):", width=label_width, anchor="w")
+        file_label = ctk.CTkLabel(file_row, text="Файл или папка дня:", width=label_width, anchor="w")
         file_label.pack(side="left")
         self._reg(file_label, "label")
         self.path_entry = ctk.CTkEntry(file_row)
@@ -1305,6 +1420,13 @@ class SketchExtractorApp:
         )
         self.browse_btn.pack(side="left")
         self._reg(self.browse_btn, "secondary_button")
+        # Папка дня: внутри папки заказов, в каждой — свой .bln (см. run_parse).
+        self.browse_folder_btn = ctk.CTkButton(
+            file_row, text="Папка дня...", command=self.browse_folder,
+            height=32, width=120, corner_radius=20,
+        )
+        self.browse_folder_btn.pack(side="left", padx=(8, 0))
+        self._reg(self.browse_folder_btn, "secondary_button")
 
         type_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         type_row.pack(fill="x", padx=16, pady=4)
@@ -1881,6 +2003,15 @@ class SketchExtractorApp:
             self.path_entry.insert(0, path)
             self.run_parse()
 
+    def browse_folder(self):
+        path = filedialog.askdirectory(
+            title="Выберите папку дня (внутри — папки заказов с файлами .bln)",
+        )
+        if path:
+            self.path_entry.delete(0, tk.END)
+            self.path_entry.insert(0, path)
+            self.run_parse()
+
     def on_type_change(self, choice=None):
         new_type = self.type_var.get()
         idx = self.columns.index("type")
@@ -1902,23 +2033,33 @@ class SketchExtractorApp:
 
         path = self.path_entry.get().strip()
         if not path:
-            self.show_message("Нет файла", "Выберите файл .bln или .pdf.")
-            return
-        if not os.path.isfile(path):
-            self.show_message("Ошибка", f"Файл не найден:\n{path}")
-            return
-
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".bln":
-            kind = "bazis"
-        elif ext == ".pdf":
-            kind = "pdf"
-        else:
             self.show_message(
-                "Неподдерживаемый файл",
-                f'Расширение "{ext}" не поддерживается. Нужен файл .bln (Базис) или .pdf (inSight).',
+                "Нет файла",
+                "Выберите файл .bln или .pdf — либо папку дня с папками заказов внутри.",
             )
             return
+
+        # Папка дня (внутри — папки заказов с .bln) разбирается пачкой, см.
+        # parse_bln_folder. Там всегда только Базис, поэтому kind — "bazis".
+        is_folder = os.path.isdir(path)
+        if not is_folder and not os.path.isfile(path):
+            self.show_message("Ошибка", f"Файл или папка не найдены:\n{path}")
+            return
+
+        if is_folder:
+            kind = "bazis"
+        else:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".bln":
+                kind = "bazis"
+            elif ext == ".pdf":
+                kind = "pdf"
+            else:
+                self.show_message(
+                    "Неподдерживаемый файл",
+                    f'Расширение "{ext}" не поддерживается. Нужен файл .bln (Базис) или .pdf (inSight).',
+                )
+                return
 
         for row in self.tree.get_children():
             self.tree.delete(row)
@@ -1935,18 +2076,29 @@ class SketchExtractorApp:
         self.log_count = 0
         self.toggle_log(expanded=False)
 
-        self.status_var.set(f"Разбираю файл: {os.path.basename(path)}...")
+        self._parse_is_folder = is_folder
+        if is_folder:
+            self.status_var.set(f"Читаю папку: {os.path.basename(os.path.normpath(path))}...")
+        else:
+            self.status_var.set(f"Разбираю файл: {os.path.basename(path)}...")
         self._set_busy(True)
         self._set_loading_state(True)
 
-        # Поток только читает файл и отдаёт результат через очередь — никаких
-        # обращений к виджетам оттуда (tkinter этого не допускает).
+        # Поток только читает файлы и отдаёт результат через очередь — никаких
+        # обращений к виджетам оттуда (tkinter этого не допускает). Прогресс по
+        # заказам идёт туда же отдельными сообщениями, см. _poll_parse.
         self._parse_queue = queue.Queue()
 
         def worker():
             try:
-                fn = parse_bln_sketches if kind == "bazis" else parse_pdf_sketches
-                self._parse_queue.put(("ok", fn(path)))
+                if is_folder:
+                    def progress(done, total, name):
+                        self._parse_queue.put(("progress", (done, total, name)))
+
+                    self._parse_queue.put(("ok", parse_bln_folder(path, progress)))
+                else:
+                    fn = parse_bln_sketches if kind == "bazis" else parse_pdf_sketches
+                    self._parse_queue.put(("ok", fn(path)))
             except Exception as e:  # noqa: BLE001 — текст ошибки покажем пользователю
                 self._parse_queue.put(("error", e))
 
@@ -1958,7 +2110,7 @@ class SketchExtractorApp:
         """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
-        for btn in (self.browse_btn, self.clear_btn, self.copy_btn):
+        for btn in (self.browse_btn, self.browse_folder_btn, self.clear_btn, self.copy_btn):
             btn.configure(state=state)
 
     def _poll_parse(self, kind, path):
@@ -1966,6 +2118,14 @@ class SketchExtractorApp:
             status, payload = self._parse_queue.get_nowait()
         except queue.Empty:
             self.root.after(100, lambda: self._poll_parse(kind, path))
+            return
+
+        if status == "progress":
+            # Разбор папки дня: показываем, какой заказ читается сейчас, и
+            # продолжаем ждать — кнопки и спиннер остаются как есть.
+            done, total, name = payload
+            self.status_var.set(f"Разбираю заказ {done} из {total}: {name}...")
+            self.root.after(50, lambda: self._poll_parse(kind, path))
             return
 
         self._set_busy(False)
@@ -2047,7 +2207,14 @@ class SketchExtractorApp:
             self.current_rows.append(row)
 
         self._set_empty_state(not results)
-        self.status_var.set(f"Найдено эскизов: {len(results)}")
+        if self._parse_is_folder:
+            # Заказы считаем по самим строкам: папка без .bln или с битой
+            # библиотекой сюда не попадёт (о ней уже сказано в журнале).
+            n_orders = len({r["order"] for r in self.current_rows if r["order"]})
+            self.log(f"Разобрано заказов: {n_orders}, эскизов: {len(results)}")
+            self.status_var.set(f"Найдено эскизов: {len(results)} (заказов: {n_orders})")
+        else:
+            self.status_var.set(f"Найдено эскизов: {len(results)}")
 
     def copy_for_table(self):
         if not self.current_rows:
