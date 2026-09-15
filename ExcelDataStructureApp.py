@@ -674,18 +674,228 @@ def _bln_files_in(directory):
     return [p for p in paths if os.path.isfile(p)]
 
 
-def find_order_bln_files(day_dir):
+# ---------------------------------------------------------------------------
+# Пометки на папках заказов — первый этап отбора
+# ---------------------------------------------------------------------------
+
+# Метка ставится прямо в имя папки заказа, сразу ПОСЛЕ номера заказа (номер у
+# пользователя всегда в начале имени):
+#   "217205 ❌ ГСС ООО Тумба под раковину тип 236" — эскизов нет, заказ не мой;
+#   "217205 ➜ ГСС ООО Тумба под раковину тип 236" — эскизы есть, заказ в работу;
+#   "217205 • ГСС ООО Тумба под раковину тип 236" — строки уже скопированы.
+# Смысл в том, чтобы не открывать каждый заказ руками: видно прямо в
+# проводнике. Метка ВСЕГДА одна — ставя новую, старую убираем
+# (см. set_order_mark), иначе после второго прогона вышло бы "217205 ➜ ➜ ...".
+MARK_NO_SKETCHES = "❌"
+MARK_HAS_SKETCHES = "➜"
+MARK_DONE = "•"
+ORDER_MARKS = (MARK_NO_SKETCHES, MARK_HAS_SKETCHES, MARK_DONE)
+
+# Папка заказа = имя начинается с номера заказа (5-7 цифр). Всё, что на это
+# не похоже, метками не трогаем вообще: в папке дня может лежать что угодно.
+ORDER_DIR_RE = re.compile(r"^\s*(\d{5,7})\s*(.*)$")
+
+
+def order_mark_of(name):
+    """Метка папки заказа или None, если её нет."""
+    m = ORDER_DIR_RE.match(name or "")
+    if not m:
+        return None
+    rest = m.group(2).lstrip()
+    return rest[0] if rest[:1] in ORDER_MARKS else None
+
+
+def strip_order_mark(name):
+    """Имя папки без метки. Метки снимаем все подряд — на случай, если в имя
+    руками попало сразу несколько."""
+    m = ORDER_DIR_RE.match(name or "")
+    if not m:
+        return name
+    rest = m.group(2).lstrip()
+    while rest[:1] in ORDER_MARKS:
+        rest = rest[1:].lstrip()
+    return f"{m.group(1)} {rest}".strip() if rest else m.group(1)
+
+
+def set_order_mark(name, mark):
+    """Имя папки с новой меткой вместо старой (см. ORDER_MARKS)."""
+    base = strip_order_mark(name)
+    m = ORDER_DIR_RE.match(base)
+    if not m:
+        return base  # не папка заказа — не выдумываем ей имя
+    rest = m.group(2).strip()
+    return f"{m.group(1)} {mark} {rest}".strip() if rest else f"{m.group(1)} {mark}"
+
+
+def set_order_dir_mark(order_dir, mark):
+    """Переименовывает папку заказа под новую метку, возвращает новый путь.
+
+    Если метка уже такая — путь возвращается как есть. Ошибку os.rename
+    (папка открыта в проводнике, нет прав) ловит вызывающий код."""
+    parent, name = os.path.split(os.path.normpath(order_dir))
+    new_name = set_order_mark(name, mark)
+    if new_name == name:
+        return order_dir
+    new_path = os.path.join(parent, new_name)
+    os.rename(order_dir, new_path)
+    return new_path
+
+
+def find_sketch_pdfs_for_order(order_dir):
+    """PDF с эскизами внутри папки заказа — искать их руками не нужно.
+
+    Два места, оба реальные у пользователя:
+      - подпапка эскизов: выгружая эскизы из .bln, он получает папку с тем же
+        именем, что и папка внутри библиотеки ("эск", "Эскизы", "эскизы"...),
+        а в ней — по одному PDF на эскиз;
+      - отдельные PDF прямо в папке заказа, если в имени есть "эск".
+    Глубже подпапки эскизов проходим целиком (os.walk): как именно Базис
+    разложит файлы внутри, зависит от структуры библиотеки.
+    """
+    found = []
+    try:
+        names = sorted(os.listdir(order_dir))
+    except OSError:
+        return []
+    for name in names:
+        full = os.path.join(order_dir, name)
+        if os.path.isdir(full):
+            if looks_like_sketch_folder(name):
+                for sub_root, _dirs, files in os.walk(full):
+                    found.extend(
+                        os.path.join(sub_root, f)
+                        for f in sorted(files) if f.lower().endswith(".pdf")
+                    )
+        elif name.lower().endswith(".pdf") and looks_like_sketch_folder(name):
+            found.append(full)
+    return found
+
+
+def bln_has_sketches(bln_path):
+    """Есть ли в библиотеке папка эскизов (или эскизы прямо в корне).
+
+    Читаем ТОЛЬКО служебный индекс $$Lib_structure$$ — для ответа "да/нет"
+    этого достаточно, а полный разбор чертежей (parse_bln_sketches) на десяти
+    заказах был бы заметно дольше. Признаки те же, что и при разборе:
+    имя папки содержит "эск" ИЛИ в имени файла есть "Эск/Эскиз + номер".
+    """
+    container = CfbContainer(bln_path)
+    xml_raw = container.get_stream("$$Lib_structure$$")
+    if xml_raw is None:
+        raise CfbReadError('Внутри файла не найден служебный индекс "$$Lib_structure$$".')
+    try:
+        root = ET.fromstring(xml_raw.decode("utf-8-sig", errors="replace"))
+    except ET.ParseError as e:
+        raise CfbReadError(f"Не удалось разобрать внутренний XML-индекс: {e}")
+
+    for directory in root.findall("Directory"):
+        name_el = directory.find("Name")
+        if name_el is not None and looks_like_sketch_folder(name_el.text):
+            return True
+    for file_el in root.findall("File"):
+        name_el = file_el.find("Name")
+        if name_el is not None and looks_like_sketch_filename(name_el.text):
+            return True
+    return False
+
+
+def list_order_dirs(day_dir):
+    """Папки заказов внутри папки дня: [(имя, метка, есть ли .bln), ...]."""
+    try:
+        entries = sorted(os.listdir(day_dir))
+    except OSError:
+        return []
+    out = []
+    for name in entries:
+        sub = os.path.join(day_dir, name)
+        if os.path.isdir(sub):
+            out.append((name, order_mark_of(name), bool(_bln_files_in(sub))))
+    return out
+
+
+def mark_order_folders(day_dir):
+    """Первый этап отбора: помечает папки заказов внутри папки дня.
+
+    Заказ считается "моим" (метка ➜), если эскизы есть ХОТЬ ГДЕ-ТО одном:
+    либо уже выгружены в папку заказа в PDF, либо лежат внутри .bln. Если
+    нет нигде — метка ❌, такой заказ можно не открывать вообще.
+
+    Папки, уже помеченные "•" (заказ разнесён по таблице), не трогаем —
+    иначе после копирования они снова становились бы "➜", и было бы
+    непонятно, сделан заказ или нет.
+
+    Возвращает (items, warnings, stats), items — [(итоговое имя, метка), ...].
+    """
+    try:
+        entries = sorted(os.listdir(day_dir))
+    except OSError as e:
+        raise CfbReadError(f"Не удалось прочитать папку:\n{day_dir}\n\n{e}")
+
+    warnings = []
+    items = []
+    stats = {"with_sketches": 0, "without_sketches": 0, "already_done": 0,
+             "renamed": 0, "not_order_dirs": 0}
+
+    for name in entries:
+        src = os.path.join(day_dir, name)
+        if not os.path.isdir(src):
+            continue
+        if not ORDER_DIR_RE.match(name):
+            stats["not_order_dirs"] += 1
+            continue
+        if order_mark_of(name) == MARK_DONE:
+            stats["already_done"] += 1
+            items.append((name, MARK_DONE))
+            continue
+
+        has_sketches = bool(find_sketch_pdfs_for_order(src))
+        if not has_sketches:
+            for bln_path in _bln_files_in(src):
+                try:
+                    if bln_has_sketches(bln_path):
+                        has_sketches = True
+                        break
+                except Exception as e:  # noqa: BLE001 — битый файл не ломает остальные
+                    warnings.append(
+                        f'{name}: не удалось заглянуть в "{os.path.basename(bln_path)}" — {e}'
+                    )
+
+        mark = MARK_HAS_SKETCHES if has_sketches else MARK_NO_SKETCHES
+        stats["with_sketches" if has_sketches else "without_sketches"] += 1
+
+        new_name = set_order_mark(name, mark)
+        if new_name != name:
+            try:
+                os.rename(src, os.path.join(day_dir, new_name))
+                stats["renamed"] += 1
+            except OSError as e:
+                warnings.append(f'Не удалось переименовать папку "{name}" — {e}')
+                new_name = name
+        items.append((new_name, mark))
+
+    if not items:
+        warnings.append(
+            "В выбранной папке нет папок заказов (имя должно начинаться с номера "
+            "заказа). Нужна папка дня, внутри которой лежат папки заказов."
+        )
+    return items, warnings, stats
+
+
+def find_order_bln_files(day_dir, only_dirs=None):
     """Ищет .bln в папках заказов внутри папки дня.
 
     Раскладка у пользователя: <папка дня>/<номер заказа>/<файл>.bln — нужный
     файл лежит ПРЯМО в папке заказа. Во вложенные подпапки не заходим
-    намеренно: там лежит всякое постороннее, а нужный .bln там не бывает.
-    Сама выбранная папка тоже просматривается — на случай, если выбрали не
-    папку дня, а сразу папку одного заказа.
+    намеренно: там лежит всякое постороннее (в том числе выгруженные эскизы),
+    а нужный .bln там не бывает. Сама выбранная папка тоже просматривается —
+    на случай, если выбрали не папку дня, а сразу папку одного заказа.
 
-    Возвращает ([(имя_папки_заказа, путь_к_bln), ...], warnings, stats);
-    порядок — по имени папки, то есть по номеру заказа. stats нужен для
-    итогового окна после разбора (см. parse_bln_folder).
+    only_dirs — имена папок заказов, которые выбрал пользователь на втором
+    этапе (см. OrderSelectionDialog); None — разбираем все.
+
+    Возвращает ([(имя_папки_заказа, путь_к_папке, путь_к_bln), ...], warnings,
+    stats); порядок — по имени папки, то есть по номеру заказа. stats нужен
+    для итогового окна после разбора (см. parse_bln_folder).
     """
     try:
         entries = sorted(os.listdir(day_dir))
@@ -699,11 +909,13 @@ def find_order_bln_files(day_dir):
     # Сначала — .bln в самой выбранной папке (выбрали папку одного заказа).
     own_name = os.path.basename(os.path.normpath(day_dir))
     for path in _bln_files_in(day_dir):
-        found.append((own_name, path))
+        found.append((own_name, day_dir, path))
 
     for name in entries:
         sub = os.path.join(day_dir, name)
         if not os.path.isdir(sub):
+            continue
+        if only_dirs is not None and name not in only_dirs:
             continue
         files = _bln_files_in(sub)
         if not files:
@@ -712,7 +924,7 @@ def find_order_bln_files(day_dir):
         if len(files) > 1:
             multi_dirs.append(name)
         for path in files:
-            found.append((name, path))
+            found.append((name, sub, path))
 
     warnings = []
     if empty_dirs:
@@ -727,7 +939,7 @@ def find_order_bln_files(day_dir):
         )
     # Папки и файлы считаем отдельно: в одной папке заказа может лежать
     # несколько .bln, и тогда файлов больше, чем заказов.
-    dirs_with_bln = len({name for name, _ in found})
+    dirs_with_bln = len({name for name, _, _ in found})
     stats = {
         "order_dirs": len(empty_dirs) + dirs_with_bln,
         "dirs_with_bln": dirs_with_bln,
@@ -737,9 +949,12 @@ def find_order_bln_files(day_dir):
     return found, warnings, stats
 
 
-def parse_bln_folder(day_dir, progress=None):
+def parse_bln_folder(day_dir, progress=None, only_dirs=None):
     """Разбирает все .bln из папок заказов внутри папки дня и склеивает
     результат в один список строк — как будто это один большой заказ.
+
+    only_dirs — имена папок заказов, выбранных пользователем (см.
+    OrderSelectionDialog); None — разбираем всё, что найдётся.
 
     Номер заказа у КАЖДОЙ строки свой: сначала то, что найдено внутри самого
     чертежа, потом номер по файлу .bln, потом имя папки заказа (папки у
@@ -768,7 +983,8 @@ def parse_bln_folder(day_dir, progress=None):
 
     results = []
     total = len(files)
-    for i, (order_dir_name, path) in enumerate(files, start=1):
+    seen_dirs = set()
+    for i, (order_dir_name, order_dir, path) in enumerate(files, start=1):
         if progress is not None:
             progress(i, total, order_dir_name)
         try:
@@ -1395,6 +1611,106 @@ class CopySelectionDialog(ctk.CTkToplevel):
         self._build_checklist(counts, checked_state)
 
 
+class OrderSelectionDialog(ctk.CTkToplevel):
+    """Какие заказы из папки дня разбирать — второй этап отбора.
+
+    Показывается только тогда, когда в папке дня есть помеченные папки, то
+    есть первый этап ("Пометить заказы") уже прошёл. Без меток разбираем всё
+    подряд, как раньше, и лишнего окна не появляется.
+
+    По умолчанию отмечены заказы с ➜ (эскизы есть) и вообще без метки; ❌ и
+    уже обработанные "•" сняты — но любой можно отметить руками.
+
+    self.result — множество имён папок или None, если закрыли/отменили."""
+
+    def __init__(self, master, colors, icon_images, theme, entries):
+        super().__init__(master)
+        self.title("Какие заказы разобрать")
+        self.resizable(False, False)
+        self.configure(fg_color=colors["bg"])
+        self.transient(master)
+        _apply_window_icon(self, icon_images, theme)
+        set_windows_dark_titlebar(self, dark=(theme == "dark"))
+
+        self.result = None
+        self._vars = {}
+
+        content = ctk.CTkFrame(
+            self, fg_color=colors["card"], corner_radius=16,
+            border_width=1, border_color=colors["border"],
+        )
+        content.grid(row=0, column=0, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            content,
+            text=f"Отмечены заказы с эскизами ({MARK_HAS_SKETCHES}). "
+                 f"Снимите лишние или добавьте нужные:",
+            text_color=colors["text"], wraplength=520, justify="left",
+        ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
+
+        scroll = ctk.CTkScrollableFrame(
+            content, width=520, height=320, corner_radius=12,
+            fg_color=colors["input"], scrollbar_button_color=colors["border"],
+            scrollbar_button_hover_color=colors["muted"],
+        )
+        scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
+
+        for name, mark, has_bln in entries:
+            # Заказ без .bln разобрать всё равно не выйдет — показываем, но
+            # отмечать не даём, чтобы не искать потом причину пустой строки.
+            preselect = has_bln and mark in (MARK_HAS_SKETCHES, None)
+            var = tk.BooleanVar(value=preselect)
+            if has_bln:
+                # Заказы без .bln в self._vars не кладём вовсе — тогда и
+                # "Выбрать всё" их не зацепит.
+                self._vars[name] = var
+            label = name if has_bln else f"{name}   (нет файла .bln)"
+            ctk.CTkCheckBox(
+                scroll, text=label, variable=var,
+                text_color=colors["text"] if has_bln else colors["muted"],
+                fg_color=colors["accent"], hover_color=colors["accent_hover"],
+                border_color=colors["border"],
+                state="normal" if has_bln else "disabled",
+            ).pack(anchor="w", pady=4, padx=4)
+
+        btn_row = ctk.CTkFrame(content, fg_color=colors["card"])
+        btn_row.grid(row=2, column=0, pady=(0, 20))
+        for text, command in (
+            ("Выбрать всё", lambda: self._set_all(True)),
+            ("Снять все", lambda: self._set_all(False)),
+            ("Отмена", self.destroy),
+        ):
+            ctk.CTkButton(
+                btn_row, text=text, command=command, width=110, height=32,
+                corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
+                text_color=colors["text"], border_width=1, border_color=colors["border"],
+            ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="Разобрать", command=self._accept, width=120, height=32,
+            corner_radius=20, fg_color=colors["accent"],
+            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
+        ).pack(side="left")
+
+        self.bind("<Return>", lambda e: self._accept())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        self.focus_force()
+        self.wait_window()
+
+    def _set_all(self, value):
+        for var in self._vars.values():
+            var.set(value)
+
+    def _accept(self):
+        self.result = {name for name, var in self._vars.items() if var.get()}
+        self.destroy()
+
+
 class LogDialog(ctk.CTkToplevel):
     """Журнал разбора отдельным окном (кнопка "Логи" под таблицей). Раньше
     журнал был сворачиваемой карточкой прямо в окне — от неё отказались,
@@ -1871,11 +2187,19 @@ class SketchExtractorApp:
         )
         self.browse_folder_btn.pack(side="left", padx=(8, 0))
         self._reg(self.browse_folder_btn, "secondary_button")
+        # Первый этап отбора: пройтись по папкам заказов и пометить, где
+        # эскизы есть, а где нет (см. mark_order_folders).
+        self.mark_btn = ctk.CTkButton(
+            file_row, text=f"Пометить заказы {MARK_HAS_SKETCHES}{MARK_NO_SKETCHES}",
+            command=self.mark_day_folder, height=32, width=170, corner_radius=20,
+        )
+        self.mark_btn.pack(side="left", padx=(8, 0))
+        self._reg(self.mark_btn, "secondary_button")
 
-        # Эскизы Базиса в PDF — выбираются вручную и СРАЗУ ВСЕ файлы заказа
-        # (выгрузка "один эскиз — один файл"). Сам программа их не ищет: в
-        # папке заказа лежит много разных PDF, а связь со строкой идёт по
-        # коду детали внутри файла (см. index_sketch_pdfs).
+        # Эскизы Базиса в PDF. Обычно указывать их руками не нужно: после
+        # разбора программа сама берёт PDF из папки заказа (подпапка "эск"/
+        # "Эскизы" или файлы с "эск" в имени, см. find_sketch_pdfs_for_order).
+        # Кнопки рядом — на случай, когда эскизы лежат где-то ещё.
         sketch_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         sketch_row.pack(fill="x", padx=16, pady=4)
         self._reg(sketch_row, "plain_frame")
@@ -2577,6 +2901,51 @@ class SketchExtractorApp:
             self.path_entry.insert(0, path)
             self.run_parse()
 
+    def mark_day_folder(self):
+        """Первый этап отбора: пройтись по папкам заказов в папке дня и
+        пометить каждую — ❌ (эскизов нет нигде) или ➜ (есть). Дальше можно
+        просто смотреть на имена папок, не открывая заказы по одному."""
+        path = self.path_entry.get().strip()
+        if not path or not os.path.isdir(path):
+            path = filedialog.askdirectory(title="Выберите папку дня для пометки заказов")
+            if not path:
+                return
+            self.path_entry.delete(0, tk.END)
+            self.path_entry.insert(0, path)
+
+        try:
+            items, warnings, stats = mark_order_folders(path)
+        except Exception as e:  # noqa: BLE001 — текст ошибки покажем пользователю
+            self.show_message("Не удалось пометить заказы", str(e))
+            return
+
+        for w in warnings:
+            self.log(f"⚠ {w}")
+        self.log(
+            f"Помечено заказов: {MARK_HAS_SKETCHES} {stats['with_sketches']}, "
+            f"{MARK_NO_SKETCHES} {stats['without_sketches']}"
+        )
+
+        lines = [
+            f"Папка: {os.path.basename(os.path.normpath(path))}",
+            "",
+            f"{MARK_HAS_SKETCHES}  Эскизы есть: {stats['with_sketches']}",
+            f"{MARK_NO_SKETCHES}  Эскизов нет: {stats['without_sketches']}",
+        ]
+        if stats["already_done"]:
+            lines.append(f"{MARK_DONE}  Уже обработаны (не трогали): {stats['already_done']}")
+        if stats["not_order_dirs"]:
+            lines.append(f"Не похожи на папки заказов (пропущены): {stats['not_order_dirs']}")
+        if warnings:
+            lines += ["", 'Были замечания — подробности в кнопке "Логи".']
+        lines += ["", f'Теперь выгрузите эскизы в заказах с {MARK_HAS_SKETCHES} и нажмите '
+                      f'"Разобрать" — программа спросит, какие заказы брать.']
+        self.show_message("Заказы помечены", "\n".join(lines), justify="left")
+        self.status_var.set(
+            f"Помечено: {MARK_HAS_SKETCHES} {stats['with_sketches']}  "
+            f"{MARK_NO_SKETCHES} {stats['without_sketches']}"
+        )
+
     def on_type_change(self, choice=None):
         new_type = self.type_var.get()
         idx = self.columns.index("type")
@@ -2611,8 +2980,26 @@ class SketchExtractorApp:
             self.show_message("Ошибка", f"Файл или папка не найдены:\n{path}")
             return
 
+        only_dirs = None
         if is_folder:
             kind = "bazis"
+            # Метки на папках есть — значит первый этап отбора уже прошёл, и
+            # пользователь выбирает, какие заказы брать в таблицу. Без меток
+            # лишнего окна не показываем: разбираем всё, как раньше.
+            entries = list_order_dirs(path)
+            if any(mark for _n, mark, _b in entries):
+                dialog = OrderSelectionDialog(
+                    self.root, THEMES[self.theme], self._icon_imgs, self.theme, entries,
+                )
+                if dialog.result is None:
+                    return  # отмена — ничего не разбираем
+                if not dialog.result:
+                    self.show_message(
+                        "Ничего не выбрано",
+                        "Не отмечено ни одного заказа — разбирать нечего.",
+                    )
+                    return
+                only_dirs = dialog.result
         else:
             ext = os.path.splitext(path)[1].lower()
             if ext == ".bln":
@@ -2660,7 +3047,9 @@ class SketchExtractorApp:
 
                     # У папки дня результат на элемент длиннее — со сводкой
                     # для итогового окна, поэтому и статус свой.
-                    self._parse_queue.put(("ok_folder", parse_bln_folder(path, progress)))
+                    self._parse_queue.put(
+                        ("ok_folder", parse_bln_folder(path, progress, only_dirs))
+                    )
                 else:
                     fn = parse_bln_sketches if kind == "bazis" else parse_pdf_sketches
                     self._parse_queue.put(("ok", fn(path)))
@@ -2675,7 +3064,8 @@ class SketchExtractorApp:
         """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
-        for btn in (self.browse_btn, self.browse_folder_btn, self.browse_sketch_pdf_btn,
+        for btn in (self.browse_btn, self.browse_folder_btn, self.mark_btn,
+                    self.browse_sketch_pdf_btn,
                     self.clear_btn, self.copy_btn, self.review_btn):
             btn.configure(state=state)
 
