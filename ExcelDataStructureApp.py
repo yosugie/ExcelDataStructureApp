@@ -1650,7 +1650,12 @@ class SketchReviewDialog(ctk.CTkToplevel):
     # --- действия ----------------------------------------------------------
 
     def _step(self, delta):
-        self._idx = (self._idx + delta) % len(self._rows)
+        # БЕЗ закольцовывания: на последней детали "вправо" никуда не ведёт.
+        # По кругу легко проскочить на второй заход и отметить не ту деталь.
+        new_idx = min(max(self._idx + delta, 0), len(self._rows) - 1)
+        if new_idx == self._idx:
+            return
+        self._idx = new_idx
         self._show()
 
     def _toggle(self):
@@ -1660,9 +1665,8 @@ class SketchReviewDialog(ctk.CTkToplevel):
             self._marked.add(self._idx)
         self._show()
         # После отметки сразу к следующей — так проходится весь заказ
-        # одной рукой, без лишнего нажатия стрелки.
-        if self._idx < len(self._rows) - 1:
-            self._step(1)
+        # одной рукой, без лишнего нажатия стрелки. На последней стоим.
+        self._step(1)
 
     def _apply(self):
         self._on_apply(set(self._marked))
