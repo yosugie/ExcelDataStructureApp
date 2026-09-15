@@ -3325,6 +3325,57 @@ class SketchExtractorApp:
         self.log(f"Строк скопировано: {len(row_values)}")
         self.status_var.set(f"Скопировано в буфер: {len(row_values)} строк")
         self.flash_copy_button()
+        self._mark_copied_orders({row["order"] for row in self.current_rows if row["include"]})
+
+    def _mark_copied_orders(self, orders):
+        """Папки скопированных заказов помечаем "•" — видно прямо в
+        проводнике, что заказ уже разнесён по таблице и открывать его снова
+        не надо. Метка одна на папку, так что "➜" при этом заменяется.
+
+        Переименование может не пройти (папка открыта в проводнике, нет
+        прав) — это не повод ронять копирование, о котором пользователь уже
+        получил подтверждение: пишем в журнал и идём дальше."""
+        renamed = []
+        for order in sorted(o for o in orders if o):
+            order_dir = self.order_dir_paths.get(order)
+            if not order_dir or not os.path.isdir(order_dir):
+                continue
+            name = os.path.basename(os.path.normpath(order_dir))
+            if order_mark_of(name) == MARK_DONE:
+                continue
+            try:
+                new_dir = set_order_dir_mark(order_dir, MARK_DONE)
+            except OSError as e:
+                self.log(f'⚠ Не удалось переименовать папку заказа "{name}" — {e}')
+                continue
+            if new_dir != order_dir:
+                self._rebase_paths(order_dir, new_dir)
+                renamed.append(os.path.basename(new_dir))
+        if renamed:
+            self.log(f"Папки помечены как обработанные ({MARK_DONE}): {', '.join(renamed)}")
+
+    def _rebase_paths(self, old_dir, new_dir):
+        """Папку переименовали — чиним все запомненные пути, которые вели
+        внутрь неё (сама папка заказа, файлы эскизов, разобранный путь).
+        Иначе следующее же действие пошло бы по несуществующему пути."""
+        for key, value in list(self.order_dir_paths.items()):
+            if value == old_dir:
+                self.order_dir_paths[key] = new_dir
+
+        def rebase(path):
+            if path == old_dir:
+                return new_dir
+            if path and path.startswith(old_dir + os.sep):
+                return new_dir + path[len(old_dir):]
+            return path
+
+        if self.sketch_pdf_paths:
+            fixed = [rebase(p) for p in self.sketch_pdf_paths]
+            if fixed != self.sketch_pdf_paths:
+                # Подпись в поле сохраняем как была (нашли сами / выбрал сам).
+                self.set_sketch_pdfs(fixed, auto=self._sketch_pdfs_auto)
+        if self.current_path:
+            self.current_path = rebase(self.current_path)
 
     def flash_copy_button(self):
         if self._copy_btn_reset_job is not None:
