@@ -1372,6 +1372,39 @@ def part_keys_from_row(row):
     return keys
 
 
+def _short_list(items, limit=10):
+    """Список для журнала: несколько первых и "и ещё N" — иначе на большом
+    заказе одна строка лога занимает весь экран."""
+    shown = ", ".join(str(i) for i in items[:limit])
+    return shown + (f" и ещё {len(items) - limit}" if len(items) > limit else "")
+
+
+def sketch_match_report(rows, index):
+    """Сверка строк таблицы и найденных эскизов — "точно ли всё сошлось".
+
+    Связь идёт по полному коду детали, вслепую ничего не подставляется, так
+    что единственный способ убедиться — посчитать обе стороны: сколько строк
+    осталось без чертежа и сколько чертежей не подошло ни к одной строке.
+    Оба числа нулевые — сошлось всё.
+
+    Возвращает (with_img, rows_without, keys_unused): списки ключей, а не
+    только счётчики — в журнал пишем ещё и примеры кодов.
+    """
+    used = set()
+    rows_without = []
+    with_img = 0
+    for row in rows:
+        keys = part_keys_from_row(row)
+        matched = [k for k in keys if k in index]
+        if matched:
+            with_img += 1
+            used.update(matched)
+        else:
+            rows_without.append(keys[0] if keys else (row.get("part") or "(без кода)"))
+    keys_unused = sorted(set(index) - used)
+    return with_img, rows_without, keys_unused
+
+
 def index_sketch_pdfs(paths):
     """Собирает {ключ детали: (путь, номер страницы)} по выбранным PDF.
 
@@ -2518,6 +2551,20 @@ class SketchExtractorApp:
                 )
         for w in warnings:
             self.log(f"⚠ {w}")
+
+        # Сверка: связь идёт по полному коду детали, вслепую ничего не
+        # подставляется — значит убедиться, что "всё сошлось", можно только
+        # посчитав обе стороны. Оба остатка нулевые — сошлось всё.
+        if index:
+            with_img, rows_without, keys_unused = sketch_match_report(self.current_rows, index)
+            self.log(
+                f"Сверка эскизов: строк {len(self.current_rows)}, с чертежом {with_img}, "
+                f"без чертежа {len(rows_without)}; чертежей без строки: {len(keys_unused)}"
+            )
+            if rows_without:
+                self.log("⚠ Без чертежа остались: " + _short_list(rows_without))
+            if keys_unused:
+                self.log("⚠ Чертежи, не подошедшие ни к одной строке: " + _short_list(keys_unused))
 
         marked = {i for i, inc in self.row_overrides.items() if inc}
         SketchReviewDialog(
