@@ -970,10 +970,13 @@ def parse_bln_folder(day_dir, progress=None, only_dirs=None):
 
     Возвращает (None, results, warnings, stats) — как parse_bln_sketches,
     только общего номера заказа нет (он свой в каждой строке), плюс stats
-    для итогового окна после разбора (см. _show_folder_summary).
+    для итогового окна после разбора (см. _show_folder_summary). В stats же
+    едут найденные рядом PDF эскизов и пути папок заказов: искать их потом
+    заново по строкам таблицы было бы неоткуда (номер заказа ≠ имя папки).
     """
-    files, warnings, stats = find_order_bln_files(day_dir)
-    stats.update(parsed_ok=0, failed=0, failed_orders=[], orders_with_sketches=0, sketches=0)
+    files, warnings, stats = find_order_bln_files(day_dir, only_dirs)
+    stats.update(parsed_ok=0, failed=0, failed_orders=[], orders_with_sketches=0,
+                 sketches=0, sketch_pdfs=[], order_dir_paths={})
     if not files:
         warnings.append(
             "В выбранной папке не нашлось ни одного файла .bln. Нужна папка дня, "
@@ -997,10 +1000,18 @@ def parse_bln_folder(day_dir, progress=None, only_dirs=None):
             )
             continue
         stats["parsed_ok"] += 1
+        # Выгруженные эскизы лежат в самой папке заказа — собираем их сразу,
+        # чтобы пользователю не пришлось указывать сотню PDF руками.
+        if order_dir not in seen_dirs:
+            seen_dirs.add(order_dir)
+            stats["sketch_pdfs"].extend(find_sketch_pdfs_for_order(order_dir))
         for row in file_results:
             row["order_from_content"] = (
                 row["order_from_content"] or file_order or order_dir_name
             )
+            # Номер заказа -> папка заказа: нужно, чтобы после копирования
+            # пометить обработанные папки (см. _mark_copied_orders).
+            stats["order_dir_paths"].setdefault(row["order_from_content"], order_dir)
         results.extend(file_results)
         # Предупреждения каждого заказа — с номером заказа впереди, иначе в
         # общей куче непонятно, к какому из них они относятся.
@@ -2106,6 +2117,10 @@ class SketchExtractorApp:
         self.current_kind = None  # "bazis" или "pdf"
         self.current_path = None  # что разбирали последним (файл или папка дня)
         self.sketch_pdf_paths = []  # выбранные PDF с эскизами (см. set_sketch_pdfs)
+        self._sketch_pdfs_auto = False  # нашлись сами в папках заказов, а не выбраны
+        # {номер заказа: папка заказа} последнего разбора — по ней после
+        # копирования папка помечается "•" (см. _mark_copied_orders).
+        self.order_dir_paths = {}
         # Ручные переопределения из диалога "Что копировать":
         # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
         # Есть запись — воля пользователя побеждает; нет — используется
@@ -2221,6 +2236,13 @@ class SketchExtractorApp:
         )
         self.browse_sketch_pdf_btn.pack(side="left")
         self._reg(self.browse_sketch_pdf_btn, "secondary_button")
+        # Выделять сотню PDF по одному незачем — папка "эск" целиком.
+        self.browse_sketch_dir_btn = ctk.CTkButton(
+            sketch_row, text="Папка...", command=self.browse_sketch_folder,
+            height=32, width=100, corner_radius=20,
+        )
+        self.browse_sketch_dir_btn.pack(side="left", padx=(8, 0))
+        self._reg(self.browse_sketch_dir_btn, "secondary_button")
 
         type_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         type_row.pack(fill="x", padx=16, pady=4)
@@ -2820,6 +2842,7 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = None
+        self.order_dir_paths = {}
         self.group_overrides = {}
         self.row_overrides = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
@@ -2859,6 +2882,23 @@ class SketchExtractorApp:
         if paths:
             self.set_sketch_pdfs(list(paths))
 
+    def browse_sketch_folder(self):
+        """Папка с эскизами целиком — удобнее, чем выделять сотню PDF по
+        одному. Берём все .pdf внутри, включая вложенные папки."""
+        folder = filedialog.askdirectory(title="Выберите папку с эскизами заказа (PDF)")
+        if not folder:
+            return
+        paths = []
+        for root_dir, _dirs, files in os.walk(folder):
+            paths.extend(
+                os.path.join(root_dir, f) for f in sorted(files)
+                if f.lower().endswith(".pdf")
+            )
+        if not paths:
+            self.show_message("Пусто", f"В этой папке нет ни одного PDF:\n{folder}")
+            return
+        self.set_sketch_pdfs(paths)
+
     def on_drop_sketch_pdf(self, event):
         # Перетащить можно и несколько файлов разом, и папку с ними — тогда
         # берём все .pdf внутри.
@@ -2879,13 +2919,20 @@ class SketchExtractorApp:
         if paths:
             self.set_sketch_pdfs(paths)
 
-    def set_sketch_pdfs(self, paths):
+    def set_sketch_pdfs(self, paths, auto=False):
         """Список файлов эскизов. В поле показываем по-человечески: один
-        файл — именем, несколько — количеством и общей папкой."""
+        файл — именем, несколько — количеством и общей папкой. auto=True —
+        файлы нашлись сами в папках заказов, так и подписываем: иначе
+        непонятно, откуда они там взялись."""
         self.sketch_pdf_paths = list(paths)
+        self._sketch_pdfs_auto = bool(auto and paths)
         self.sketch_pdf_entry.configure(state="normal")
         self.sketch_pdf_entry.delete(0, tk.END)
-        if len(paths) == 1:
+        if auto and paths:
+            folders = len({os.path.dirname(p) for p in paths})
+            where = f"{folders} папках заказов" if folders > 1 else os.path.dirname(paths[0])
+            self.sketch_pdf_entry.insert(0, f"найдено само: {len(paths)}  —  {where}")
+        elif len(paths) == 1:
             self.sketch_pdf_entry.insert(0, paths[0])
         elif paths:
             folder = os.path.dirname(paths[0])
@@ -3018,6 +3065,7 @@ class SketchExtractorApp:
         self.current_rows = []
         self.current_kind = kind
         self.current_path = path  # нужен "Просмотру": ищет PDF рядом с .bln
+        self.order_dir_paths = {}
         self.group_overrides = {}
         self.row_overrides = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
@@ -3065,7 +3113,7 @@ class SketchExtractorApp:
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
         for btn in (self.browse_btn, self.browse_folder_btn, self.mark_btn,
-                    self.browse_sketch_pdf_btn,
+                    self.browse_sketch_pdf_btn, self.browse_sketch_dir_btn,
                     self.clear_btn, self.copy_btn, self.review_btn):
             btn.configure(state=state)
 
@@ -3095,10 +3143,36 @@ class SketchExtractorApp:
 
         if status == "ok_folder":
             order_number, results, warnings, stats = payload
+            self.order_dir_paths = dict(stats.get("order_dir_paths") or {})
             self._fill_results(kind, path, order_number, results, warnings)
+            self._use_found_sketch_pdfs(stats.get("sketch_pdfs") or [])
             self._show_folder_summary(path, stats)
+            # Заказы выбраны, таблица есть, эскизы нашлись — сразу к просмотру:
+            # ради него всё и затевалось, лишний клик тут ни к чему. Без
+            # pypdfium2 показывать нечего, и ругаться на это после каждого
+            # разбора папки незачем — пользователь нажмёт кнопку сам.
+            if self.current_rows and self.sketch_pdf_paths and HAS_PYPDFIUM:
+                self.open_review_dialog()
             return
+
         self._fill_results(kind, path, *payload)
+        if kind == "bazis":
+            # Одиночный .bln: папка заказа — та, где он лежит; эскизы, если
+            # выгружены, лежат там же (подпапка "эск"/"Эскизы").
+            order_dir = os.path.dirname(os.path.abspath(path))
+            self.order_dir_paths = {
+                r["order"]: order_dir for r in self.current_rows if r.get("order")
+            }
+            self._use_found_sketch_pdfs(find_sketch_pdfs_for_order(order_dir))
+
+    def _use_found_sketch_pdfs(self, paths):
+        """Подставляет найденные рядом с заказами PDF эскизов. Если не нашлось
+        ничего — оставляем то, что пользователь выбрал руками: своё лучше, чем
+        пустое поле."""
+        if not paths:
+            return
+        self.set_sketch_pdfs(paths, auto=True)
+        self.log(f"Найдено файлов эскизов (PDF) в папках заказов: {len(paths)}")
 
     def _show_folder_summary(self, day_dir, stats):
         """Итог разбора папки дня отдельным окном — чтобы сразу было видно,
@@ -3116,6 +3190,7 @@ class SketchExtractorApp:
         ]
         if stats.get("bln_files", 0) != stats.get("dirs_with_bln", 0):
             lines.insert(4, f"Файлов .bln разобрано: {stats.get('bln_files', 0)}")
+        lines.append(f"Эскизов (PDF) найдено рядом: {len(stats.get('sketch_pdfs') or [])}")
 
         problems = []
         if stats.get("dirs_without_bln"):
