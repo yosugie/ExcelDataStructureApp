@@ -1177,32 +1177,6 @@ def index_bazis_sketch_pages(pdf_path):
     return pages, order
 
 
-def find_bazis_sketch_pdf(bln_path, order_number):
-    """PDF с эскизами рядом с .bln — в той же папке заказа. Отбираем по
-    номеру заказа в имени файла (Базис так и называет распечатку), а если
-    подходящих несколько — берём первый по алфавиту."""
-    if not order_number:
-        return None
-    folder = os.path.dirname(os.path.abspath(bln_path))
-    try:
-        names = sorted(os.listdir(folder))
-    except OSError:
-        return None
-    for name in names:
-        if not name.lower().endswith(".pdf"):
-            continue
-        digits = re.sub(r"\D", "", name)
-        if order_number in digits:
-            return os.path.join(folder, name)
-    return None
-
-
-def render_pdf_page(pdf_path, page_index, resolution=110):
-    """Страница PDF как PIL-картинка (для показа в окне "Просмотр")."""
-    with pdfplumber.open(pdf_path) as pdf:
-        return pdf.pages[page_index].to_image(resolution=resolution).original
-
-
 # ---------------------------------------------------------------------------
 # Интерфейс
 # ---------------------------------------------------------------------------
@@ -1474,11 +1448,16 @@ class SketchReviewDialog(ctk.CTkToplevel):
     пользователь заполняет сам), НЕотмеченные остаются серыми строками:
     в таблице они есть — это отчётность, — но в буфер не идут.
 
-    Листаем именно СТРОКИ, а не страницы PDF: в буфер уходят строки, и
-    отметка всегда попадает в ту деталь, чьи данные видно рядом. Картинка
-    подставляется только там, где номер эскиза строки нашёлся в распечатке
-    (см. index_bazis_sketch_pages) — иначе показываем данные без чертежа,
-    но никогда чужую страницу.
+    Стрелки ВЛЕВО/ВПРАВО листают именно СТРОКИ, а не страницы PDF: в буфер
+    уходят строки, и отметка всегда попадает в ту деталь, чьи данные видно
+    рядом. Картинку программа подставляет сама там, где номер эскиза строки
+    нашёлся в распечатке (см. index_bazis_sketch_pages), и НИКОГДА не
+    подставляет соседнюю страницу наугад.
+
+    Стрелки ВВЕРХ/ВНИЗ листают страницы PDF для текущей строки — этим
+    пользователь сам ставит нужный чертёж там, где номер на странице
+    нарисован чертёжным шрифтом и машинально не читается. Выбор
+    запоминается по строке (_page_override).
 
     Enter применяет отметки, Esc закрывает без изменений."""
 
@@ -1499,6 +1478,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._on_apply = on_apply
         self._marked = set(marked or ())
         self._idx = 0
+        self._page_override = {}  # {строка: страница} — выбрано вручную стрелками
         self._img_cache = {}
         self._ctk_img = None  # держим ссылку, иначе картинку соберёт сборщик мусора
 
@@ -1547,8 +1527,15 @@ class SketchReviewDialog(ctk.CTkToplevel):
             content, textvariable=self._counter_var, text_color=colors["muted"],
         ).pack(pady=(10, 0))
 
+        self._page_var = tk.StringVar()
         ctk.CTkLabel(
-            content, text="← → листать    ПРОБЕЛ отметить «делаю»    Enter применить    Esc отмена",
+            content, textvariable=self._page_var, text_color=colors["muted"],
+        ).pack(pady=(2, 0))
+
+        ctk.CTkLabel(
+            content,
+            text=("← → деталь    ↑ ↓ страница эскиза    ПРОБЕЛ отметить «делаю»    "
+                  "Enter применить    Esc отмена"),
             text_color=colors["muted"],
         ).pack(pady=(8, 0))
 
@@ -1583,6 +1570,8 @@ class SketchReviewDialog(ctk.CTkToplevel):
             ("<Right>", lambda e: self._step(1)),
             ("<Prior>", lambda e: self._step(-1)),
             ("<Next>", lambda e: self._step(1)),
+            ("<Up>", lambda e: self._page_step(-1)),
+            ("<Down>", lambda e: self._page_step(1)),
             ("<space>", lambda e: self._toggle()),
             ("<Return>", lambda e: self._apply()),
             ("<Escape>", lambda e: self.destroy()),
@@ -1625,20 +1614,20 @@ class SketchReviewDialog(ctk.CTkToplevel):
         # PhotoImage, на который ещё смотрит виджет, и тот падает с
         # 'image "pyimageN" doesn't exist' на следующем же configure.
         previous = self._ctk_img
-        page_index = self._pages.get(row.get("sketch_no"))
-        if self._pdf is not None and page_index is not None:
+        page_index = self._current_page()
+        if page_index is not None:
             img, size = self._page_image(page_index)
             new_img = ctk.CTkImage(light_image=img, dark_image=img, size=size)
             self._img_label.configure(image=new_img, text="")
         else:
             new_img = None
-            no = row.get("sketch_no")
             if self._pdf is None:
-                note = "Распечатка эскизов не найдена —\nрядом с .bln нет PDF этого заказа"
+                note = ('Не выбран PDF с эскизами.\n'
+                        'Укажите его в поле "Эскизы для просмотра (PDF)" и откройте просмотр снова.')
             else:
-                note = (f"Эскиз {no} не найден в распечатке.\n"
-                        "Номер подписан на странице не текстом, а чертёжным шрифтом,\n"
-                        "поэтому связать её со строкой нельзя — решайте по данным ниже.")
+                note = (f"Эскиз {row.get('sketch_no')} не найден в распечатке.\n"
+                        "Номер на странице нарисован чертёжным шрифтом и не читается,\n"
+                        "поэтому сам подставить не могу — пролистайте ↑ ↓ до нужной страницы.")
             self._img_label.configure(image="", text=note)
         self._ctk_img = new_img
         del previous
@@ -1649,11 +1638,42 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._counter_var.set(
             f"{self._idx + 1} из {len(self._rows)}    •    отмечено: {len(self._marked)}"
         )
+        self._page_var.set(self._page_note(page_index))
+
+    def _current_page(self):
+        """Страница для текущей строки: выбранная вручную стрелками важнее
+        найденной по номеру эскиза."""
+        if self._pdf is None:
+            return None
+        if self._idx in self._page_override:
+            return self._page_override[self._idx]
+        return self._pages.get(self._rows[self._idx].get("sketch_no"))
+
+    def _page_note(self, page_index):
+        if self._pdf is None:
+            return ""
+        total = len(self._pdf.pages)
+        if page_index is None:
+            return f"страница не определена (в PDF их {total}) — листайте ↑ ↓"
+        how = "выбрана вручную" if self._idx in self._page_override else "найдена по номеру эскиза"
+        return f"страница {page_index + 1} из {total} — {how}"
 
     # --- действия ----------------------------------------------------------
 
     def _step(self, delta):
         self._idx = (self._idx + delta) % len(self._rows)
+        self._show()
+
+    def _page_step(self, delta):
+        """Листает страницы PDF для ТЕКУЩЕЙ строки — на случай, когда номер
+        эскиза со страницы не прочитался или подставился не тот чертёж."""
+        if self._pdf is None:
+            return
+        total = len(self._pdf.pages)
+        current = self._current_page()
+        # Если страницы ещё не было, начинаем с первой, а не с "минус первой".
+        base = 0 if current is None else (current + delta) % total
+        self._page_override[self._idx] = base
         self._show()
 
     def _toggle(self):
@@ -1799,6 +1819,31 @@ class SketchExtractorApp:
         )
         self.browse_folder_btn.pack(side="left", padx=(8, 0))
         self._reg(self.browse_folder_btn, "secondary_button")
+
+        # Распечатка эскизов Базиса — отдельным полем, а не поиском рядом с
+        # .bln: в папке заказа лежит много разных PDF, и угадывать нужный
+        # нельзя — не тот файл означает чужой чертёж при разметке.
+        sketch_row = ctk.CTkFrame(main_card, fg_color=t["card"])
+        sketch_row.pack(fill="x", padx=16, pady=4)
+        self._reg(sketch_row, "plain_frame")
+        sketch_label = ctk.CTkLabel(
+            sketch_row, text="Эскизы для просмотра (PDF):", width=label_width, anchor="w",
+        )
+        sketch_label.pack(side="left")
+        self._reg(sketch_label, "label")
+        self.sketch_pdf_entry = ctk.CTkEntry(sketch_row)
+        self.sketch_pdf_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._reg(self.sketch_pdf_entry, "entry")
+        fix_clipboard_shortcuts(self.sketch_pdf_entry)
+        if HAS_DND:
+            self.sketch_pdf_entry.drop_target_register(DND_FILES)
+            self.sketch_pdf_entry.dnd_bind("<<Drop>>", self.on_drop_sketch_pdf)
+        self.browse_sketch_pdf_btn = ctk.CTkButton(
+            sketch_row, text="Обзор...", command=self.browse_sketch_pdf,
+            height=32, width=90, corner_radius=20,
+        )
+        self.browse_sketch_pdf_btn.pack(side="left")
+        self._reg(self.browse_sketch_pdf_btn, "secondary_button")
 
         type_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         type_row.pack(fill="x", padx=16, pady=4)
@@ -2042,31 +2087,34 @@ class SketchExtractorApp:
 
     def open_review_dialog(self):
         """Просмотр эскизов заказа с отметкой "делаю сегодня" (см.
-        SketchReviewDialog). Картинки берутся из распечатки эскизов Базиса,
-        если она лежит рядом с .bln."""
+        SketchReviewDialog). Картинки берутся из PDF, выбранного в поле
+        "Эскизы для просмотра" — сам искать файл программа не пытается: в
+        папке заказа лежит много разных PDF, и не тот файл означал бы чужой
+        чертёж при разметке."""
         if not self.current_rows:
             self.show_message("Нечего смотреть", "Сначала разберите файл.")
             return
 
-        pdf_path, pages = None, {}
-        if self.current_kind == "bazis" and self.current_path and not self._parse_is_folder:
-            order = next(
-                (r.get("order") for r in self.current_rows if r.get("order")), None
-            )
-            pdf_path = find_bazis_sketch_pdf(self.current_path, order)
-            if pdf_path:
-                try:
-                    pages, pdf_order = index_bazis_sketch_pages(pdf_path)
-                except Exception as e:  # noqa: BLE001 — без картинок окно всё равно работает
-                    self.log(f"⚠ Не удалось прочитать распечатку эскизов {os.path.basename(pdf_path)}: {e}")
-                    pdf_path, pages = None, {}
-                else:
-                    if pdf_order and order and pdf_order != order:
-                        self.log(
-                            f"⚠ Распечатка эскизов {os.path.basename(pdf_path)} — от заказа "
-                            f"{pdf_order}, а разобран {order}. Картинки не показываю."
-                        )
-                        pdf_path, pages = None, {}
+        pdf_path = self.sketch_pdf_entry.get().strip() or None
+        pages = {}
+        if pdf_path:
+            if not os.path.isfile(pdf_path):
+                self.show_message("Ошибка", f"Файл эскизов не найден:\n{pdf_path}")
+                return
+            try:
+                pages, pdf_order = index_bazis_sketch_pages(pdf_path)
+            except Exception as e:  # noqa: BLE001 — покажем текст ошибки
+                self.show_message(
+                    "Не удалось прочитать эскизы",
+                    f"{os.path.basename(pdf_path)}:\n{e}",
+                )
+                return
+            order = next((r.get("order") for r in self.current_rows if r.get("order")), None)
+            if pdf_order and order and pdf_order != order:
+                self.log(
+                    f"⚠ В выбранном PDF эскизы заказа {pdf_order}, а разобран {order} — "
+                    f"проверьте, тот ли файл."
+                )
 
         marked = {i for i, inc in self.row_overrides.items() if inc}
         SketchReviewDialog(
@@ -2386,6 +2434,7 @@ class SketchExtractorApp:
 
     def clear_all(self):
         self.path_entry.delete(0, tk.END)
+        self.sketch_pdf_entry.delete(0, tk.END)
         for row in self.tree.get_children():
             self.tree.delete(row)
         self.current_rows = []
@@ -2420,6 +2469,21 @@ class SketchExtractorApp:
             self.path_entry.delete(0, tk.END)
             self.path_entry.insert(0, path)
             self.run_parse()
+
+    def browse_sketch_pdf(self):
+        path = filedialog.askopenfilename(
+            title="Выберите PDF с распечаткой эскизов этого заказа",
+            filetypes=[("PDF с эскизами", "*.pdf"), ("Все файлы", "*.*")],
+        )
+        if path:
+            self.set_sketch_pdf(path)
+
+    def on_drop_sketch_pdf(self, event):
+        self.set_sketch_pdf(event.data.strip().strip("{}"))
+
+    def set_sketch_pdf(self, path):
+        self.sketch_pdf_entry.delete(0, tk.END)
+        self.sketch_pdf_entry.insert(0, path)
 
     def browse_folder(self):
         path = filedialog.askdirectory(
@@ -2528,8 +2592,8 @@ class SketchExtractorApp:
         """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
-        for btn in (self.browse_btn, self.browse_folder_btn, self.clear_btn,
-                    self.copy_btn, self.review_btn):
+        for btn in (self.browse_btn, self.browse_folder_btn, self.browse_sketch_pdf_btn,
+                    self.clear_btn, self.copy_btn, self.review_btn):
             btn.configure(state=state)
 
     def _poll_parse(self, kind, path):
