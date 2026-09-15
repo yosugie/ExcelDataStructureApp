@@ -1482,7 +1482,8 @@ class SketchReviewDialog(ctk.CTkToplevel):
 
     Enter применяет отметки, Esc закрывает без изменений."""
 
-    IMG_BOX = (880, 700)  # в эту рамку вписывается страница эскиза
+    MIN_IMG_BOX = (600, 420)   # меньше этого чертёж не ужимаем — не прочитать
+    INFO_WIDTH = 330           # колонка с данными детали справа от чертежа
 
     def __init__(self, master, colors, icon_images, theme, rows, sketch_index,
                  marked, on_apply):
@@ -1501,73 +1502,94 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._idx = 0
         self._img_cache = {}
         self._ctk_img = None  # держим ссылку, иначе картинку соберёт сборщик мусора
+        self._img_box = self.MIN_IMG_BOX
+        self._resize_job = None
 
-        content = ctk.CTkFrame(
-            self, fg_color=colors["card"], corner_radius=16,
-            border_width=1, border_color=colors["border"],
-        )
-        content.pack(fill="both", expand=True, padx=16, pady=16)
+        # Окно сразу на весь экран: чертёж мелкий, чем больше места, тем
+        # меньше вглядываться. Разворачиваем ДО первой отрисовки, чтобы
+        # картинка сразу считалась под реальный размер, а не под минимальный.
+        self._go_maximized()
+
+        # Никаких карточек и рамок: всё место отдано чертежу, данные детали —
+        # узкой колонкой справа.
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
         self._img_label = ctk.CTkLabel(
-            content, text="", width=self.IMG_BOX[0], height=self.IMG_BOX[1],
-            fg_color=colors["input"], corner_radius=12, text_color=colors["muted"],
+            self, text="", fg_color=colors["input"], corner_radius=12,
+            text_color=colors["muted"],
         )
-        self._img_label.pack(padx=20, pady=(20, 12))
+        self._img_label.grid(row=0, column=0, sticky="nsew", padx=(16, 12), pady=16)
+        self._img_label.bind("<Configure>", self._on_img_resize)
 
-        self._part_var = tk.StringVar()
-        ctk.CTkLabel(
-            content, textvariable=self._part_var, text_color=colors["text"],
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack()
+        side = ctk.CTkFrame(self, fg_color=colors["bg"], width=self.INFO_WIDTH)
+        side.grid(row=0, column=1, sticky="ns", padx=(0, 16), pady=16)
+        side.grid_propagate(False)
+        side.grid_columnconfigure(0, weight=1)
 
-        self._desc_var = tk.StringVar()
-        ctk.CTkLabel(
-            content, textvariable=self._desc_var, text_color=colors["muted"],
-        ).pack(pady=(2, 0))
+        # Данные детали — парами "подпись слева, значение справа", как в
+        # шапке чертежа: глаз находит нужную строку, не перечитывая всё.
+        self._fields = {}
+        rows_spec = (
+            ("order", "№ заказа"),
+            ("part", "№ детали"),
+            ("description", "Описание"),
+            ("material", "Материал"),
+        )
+        info = ctk.CTkFrame(side, fg_color=colors["card"], corner_radius=12)
+        info.grid(row=0, column=0, sticky="ew")
+        info.grid_columnconfigure(1, weight=1)
+        for i, (key, caption) in enumerate(rows_spec):
+            ctk.CTkLabel(
+                info, text=caption, text_color=colors["muted"], anchor="w",
+            ).grid(row=i, column=0, sticky="nw", padx=(14, 10), pady=(12 if not i else 6, 0))
+            var = tk.StringVar()
+            self._fields[key] = var
+            ctk.CTkLabel(
+                info, textvariable=var, text_color=colors["text"], anchor="e",
+                justify="right", wraplength=self.INFO_WIDTH - 130,
+                font=ctk.CTkFont(size=14, weight="bold"),
+            ).grid(row=i, column=1, sticky="ne", padx=(0, 14), pady=(12 if not i else 6, 0))
+        ctk.CTkLabel(info, text="", height=6).grid(row=len(rows_spec), column=0)
 
         self._state_var = tk.StringVar()
         self._state_label = ctk.CTkLabel(
-            content, textvariable=self._state_var,
+            side, textvariable=self._state_var,
             font=ctk.CTkFont(size=15, weight="bold"),
         )
-        self._state_label.pack(pady=(10, 0))
+        self._state_label.grid(row=1, column=0, sticky="ew", pady=(14, 0))
 
         self._counter_var = tk.StringVar()
         ctk.CTkLabel(
-            content, textvariable=self._counter_var, text_color=colors["muted"],
-        ).pack(pady=(10, 0))
+            side, textvariable=self._counter_var, text_color=colors["muted"],
+            justify="center",
+        ).grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+        side.grid_rowconfigure(3, weight=1)  # кнопки прижаты к низу колонки
+
+        btn_col = ctk.CTkFrame(side, fg_color=colors["bg"])
+        btn_col.grid(row=4, column=0, sticky="ew")
+        btn_col.grid_columnconfigure((0, 1), weight=1)
+        nav = dict(height=34, corner_radius=20, fg_color=colors["card"],
+                   hover_color=colors["input"], text_color=colors["text"],
+                   border_width=1, border_color=colors["border"])
+        ctk.CTkButton(btn_col, text="◀", command=lambda: self._step(-1), **nav) \
+            .grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ctk.CTkButton(btn_col, text="▶", command=lambda: self._step(1), **nav) \
+            .grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ctk.CTkButton(btn_col, text="Отметить «делаю» (пробел)", command=self._toggle, **nav) \
+            .grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ctk.CTkButton(
+            btn_col, text="Готово", command=self._apply, height=36, corner_radius=20,
+            fg_color=colors["accent"], hover_color=colors["accent_hover"],
+            text_color=colors["accent_text"],
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         ctk.CTkLabel(
-            content,
-            text="← → деталь    ПРОБЕЛ отметить «делаю»    Enter применить    Esc отмена",
-            text_color=colors["muted"],
-        ).pack(pady=(8, 0))
-
-        btn_row = ctk.CTkFrame(content, fg_color=colors["card"])
-        btn_row.pack(pady=(12, 20))
-        ctk.CTkButton(
-            btn_row, text="◀", width=50, height=32, corner_radius=20,
-            command=lambda: self._step(-1), fg_color=colors["card"],
-            hover_color=colors["input"], text_color=colors["text"],
-            border_width=1, border_color=colors["border"],
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            btn_row, text="Отметить (пробел)", width=180, height=32, corner_radius=20,
-            command=self._toggle, fg_color=colors["card"],
-            hover_color=colors["input"], text_color=colors["text"],
-            border_width=1, border_color=colors["border"],
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            btn_row, text="▶", width=50, height=32, corner_radius=20,
-            command=lambda: self._step(1), fg_color=colors["card"],
-            hover_color=colors["input"], text_color=colors["text"],
-            border_width=1, border_color=colors["border"],
-        ).pack(side="left", padx=(0, 16))
-        ctk.CTkButton(
-            btn_row, text="Готово", width=120, height=32, corner_radius=20,
-            command=self._apply, fg_color=colors["accent"],
-            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
-        ).pack(side="left")
+            side, text="← →  листать      ПРОБЕЛ  отметить\nEnter  применить      Esc  отмена\n"
+                       "F11  во весь экран",
+            text_color=colors["muted"], justify="center",
+        ).grid(row=5, column=0, sticky="ew", pady=(12, 0))
 
         for seq, fn in (
             ("<Left>", lambda e: self._step(-1)),
@@ -1576,17 +1598,69 @@ class SketchReviewDialog(ctk.CTkToplevel):
             ("<Next>", lambda e: self._step(1)),
             ("<space>", lambda e: self._toggle()),
             ("<Return>", lambda e: self._apply()),
-            ("<Escape>", lambda e: self.destroy()),
+            ("<Escape>", lambda e: self._on_escape()),
+            ("<F11>", lambda e: self._toggle_fullscreen()),
+            ("<Double-Button-1>", lambda e: self._toggle_fullscreen()),
         ):
             self.bind(seq, fn)
 
         self._show()
-        self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
-        y = max(master.winfo_rooty() - 40, 0)
-        self.geometry(f"+{x}+{y}")
         self.grab_set()
         self.focus_force()
+
+    # --- окно --------------------------------------------------------------
+
+    def _go_maximized(self):
+        """Развернуть окно на весь экран.
+
+        Сначала просто задаём размер в экран: этого достаточно и там, где
+        оконный менеджер запрос "развернуть" молча игнорирует. И только
+        потом просим систему развернуть окно по-настоящему — на Windows это
+        state("zoomed"), на Linux атрибут -zoomed; который из них сработает,
+        заранее не известно, поэтому пробуем оба."""
+        self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+        for maximize in (lambda: self.state("zoomed"),
+                         lambda: self.attributes("-zoomed", True)):
+            try:
+                maximize()
+                return
+            except tk.TclError:
+                continue
+
+    def _toggle_fullscreen(self):
+        """Полный экран (без рамки и панели задач) по F11 или двойному клику."""
+        try:
+            self.attributes("-fullscreen", not self.attributes("-fullscreen"))
+        except tk.TclError:
+            pass
+
+    def _on_escape(self):
+        # Esc сначала выходит из полного экрана, и только потом закрывает
+        # окно — иначе выйти из него, ничего не потеряв, было бы нечем.
+        try:
+            if self.attributes("-fullscreen"):
+                self.attributes("-fullscreen", False)
+                return
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def _on_img_resize(self, event):
+        """Чертёж перерисовываем под новый размер окна, но не на каждый пиксель
+        тягания рамки: пересчёт идёт через таймер и только при заметном
+        изменении, иначе окно дёргается."""
+        box = (max(event.width - 24, self.MIN_IMG_BOX[0]),
+               max(event.height - 24, self.MIN_IMG_BOX[1]))
+        if abs(box[0] - self._img_box[0]) < 40 and abs(box[1] - self._img_box[1]) < 40:
+            return
+        self._img_box = box
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(150, self._rerender)
+
+    def _rerender(self):
+        self._resize_job = None
+        self._show()
 
     # --- показ -------------------------------------------------------------
 
@@ -1598,9 +1672,12 @@ class SketchReviewDialog(ctk.CTkToplevel):
         return None
 
     def _page_image(self, path, page_index):
-        cache_key = (path, page_index)
+        # Размер рамки — часть ключа: после разворота окна та же страница
+        # рисуется заново крупнее, а старая версия остаётся в кэше для
+        # обратного случая.
+        cache_key = (path, page_index, self._img_box)
         if cache_key not in self._img_cache:
-            img = render_sketch_page(path, page_index, self.IMG_BOX)
+            img = render_sketch_page(path, page_index, self._img_box)
             self._img_cache[cache_key] = (img, (img.width, img.height))
         return self._img_cache[cache_key]
 
@@ -1609,10 +1686,12 @@ class SketchReviewDialog(ctk.CTkToplevel):
         colors = self._colors
         # В строках таблицы номер детали лежит под "part" (разборщик отдаёт
         # его как "part_code", _fill_results переименовывает) — читаем оба.
-        self._part_var.set(row.get("part") or row.get("part_code") or "(без номера)")
-        material = row.get("material") or ""
-        desc = row.get("description") or "(без названия)"
-        self._desc_var.set(f"{desc}    •    {material}" if material else desc)
+        part = row.get("part") or row.get("part_code") or "(без номера)"
+        self._fields["order"].set(
+            row.get("order") or row.get("order_from_content") or "—")
+        self._fields["part"].set(part)
+        self._fields["description"].set(row.get("description") or "—")
+        self._fields["material"].set(row.get("material") or "—")
 
         # ВАЖНО: старую картинку отпускаем ТОЛЬКО ПОСЛЕ configure(). Если
         # обнулить self._ctk_img раньше, сборщик мусора успевает удалить
@@ -1627,13 +1706,13 @@ class SketchReviewDialog(ctk.CTkToplevel):
         else:
             new_img = None
             if not self._index:
-                note = ("Эскизы не выбраны.\n"
-                        'Выгрузите их из Базиса в PDF и укажите в поле "Эскизы (PDF)" —\n'
-                        "можно выделить сразу все файлы заказа.")
+                note = ("Эскизы не выбраны.\n\n"
+                        "Выгрузите их из Базиса в PDF — программа сама подхватит их\n"
+                        'из папки заказа ("эск", "Эскизы"), либо укажите вручную\n'
+                        'в поле "Эскизы заказа (PDF)".')
             else:
-                note = (f"Для детали {self._part_var.get()} эскиз среди выбранных файлов\n"
-                        "не найден — показывать нечего.\n"
-                        "Решайте по названию и материалу ниже.")
+                note = (f"Для детали {part} эскиз среди выбранных файлов не найден —\n"
+                        "показывать нечего. Решайте по названию и материалу справа.")
             self._img_label.configure(image="", text=note)
         self._ctk_img = new_img
         del previous
@@ -1643,8 +1722,8 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._state_label.configure(text_color=SUCCESS_COLOR if marked else colors["muted"])
         with_img = sum(1 for r in self._rows if self._sketch_for_row(r) is not None)
         self._counter_var.set(
-            f"{self._idx + 1} из {len(self._rows)}    •    отмечено: {len(self._marked)}"
-            f"    •    с чертежом: {with_img}"
+            f"{self._idx + 1} из {len(self._rows)}    •    отмечено: {len(self._marked)}\n"
+            f"с чертежом: {with_img}"
         )
 
     # --- действия ----------------------------------------------------------
