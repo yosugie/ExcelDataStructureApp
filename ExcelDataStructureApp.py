@@ -467,6 +467,24 @@ def looks_like_sketch_filename(name):
     return bool(SKETCH_FILENAME_RE.search(name or ""))
 
 
+# Номер эскиза из имени файла — нужен, чтобы связать строку таблицы с
+# нужной страницей распечатки эскизов в PDF (там подписано "Эскиз N", см.
+# index_bazis_sketch_pages). Два написания: "эскиз 1" где угодно в имени
+# и "1 (Панель).ldw" — так называются файлы в папке "эск".
+SKETCH_NO_RE = re.compile(r"Эск(?:из)?\s*(\d+)", re.IGNORECASE)
+SKETCH_NO_LEADING_RE = re.compile(r"^(\d{1,3})\s*\(")
+
+
+def sketch_number_from_filename(name):
+    """Номер эскиза или None. "01 006 (Бок правый).ldw" даёт None намеренно:
+    это номер детали и секции, а не эскиза."""
+    m = SKETCH_NO_RE.search(name or "")
+    if m:
+        return int(m.group(1))
+    m = SKETCH_NO_LEADING_RE.match((name or "").strip())
+    return int(m.group(1)) if m else None
+
+
 def is_assembly_filename(name):
     """Сборочный чертёж (СБ) — показываем в таблице для проверки, но не
     копируем как отдельную деталь (это не то же самое, что "деталь")."""
@@ -611,6 +629,7 @@ def parse_bln_sketches(bln_path):
         if order_number:
             order_votes[order_number] = order_votes.get(order_number, 0) + 1
 
+        sketch_no = sketch_number_from_filename(fname)
         for part_code in part_codes:
             results.append({
                 "order_from_content": order_number,
@@ -618,6 +637,9 @@ def parse_bln_sketches(bln_path):
                 "description": description,
                 "material": material,
                 "auto_exclude": is_assembly or is_too_thin or is_excluded_name or is_glass,
+                # Номер эскиза — только для показа картинки в "Просмотре"
+                # (см. index_bazis_sketch_pages), на таблицу не влияет.
+                "sketch_no": sketch_no,
             })
 
     if n_not_machinable:
@@ -1089,6 +1111,99 @@ def parse_pdf_sketches(pdf_path):
 
 
 # ---------------------------------------------------------------------------
+# Распечатка эскизов Базиса в PDF (картинки для окна "Просмотр")
+# ---------------------------------------------------------------------------
+#
+# Это НЕ отчёт inSight (см. parse_pdf_sketches выше), а печать папки "эск"
+# из самого Базиса: одна страница = один эскиз, в углу подписано "Эскиз N",
+# внизу колонтитул "Зак№217464/...". Нужна только чтобы показать чертёж
+# глазами — в таблицу из неё ничего не берётся.
+#
+# ВАЖНО, проверено на реальном файле: страницы и строки таблицы НЕ совпадают
+# один к одному. В заказе 217464 девять эскизов, а в PDF семь страниц, и
+# шестая страница — это "Эскиз 8" (эскизы 6 и 7 просто не печатали).
+# Поэтому связываем строго по номеру эскиза, а порядок страниц не
+# используем вообще: угадывание тут даёт неверную картинку к строке.
+#
+# Ещё одна особенность: на части страниц "Эскиз N" — настоящий текст, а на
+# части он нарисован кривыми (как и код детали в штампе) и не читается
+# никак. Такие страницы остаются без номера, и строки, которым они
+# соответствуют, показываются без картинки — это честнее, чем подставить
+# чужой чертёж.
+
+BAZIS_PDF_ORDER_RE = re.compile(r"Зак№\s*(\d+)")
+BAZIS_SKETCH_PAGE_RE = re.compile(r"Эскиз\s*(\d+)")
+
+
+def _page_sketch_number(page):
+    """Номер эскиза со страницы распечатки. Надпись бывает повёрнута на 90°,
+    поэтому символы группируются по ориентации и по строке вдоль своей оси —
+    обычный extract_text() повёрнутую надпись не собирает."""
+    for upright in (True, False):
+        lines = {}
+        for ch in page.chars:
+            if bool(ch.get("upright", True)) != upright:
+                continue
+            if upright:
+                key, pos = round(ch["top"] / 3), ch["x0"]
+            else:
+                key, pos = round(ch["x0"] / 3), -ch["top"]
+            lines.setdefault(key, []).append((pos, ch["text"]))
+        for key in sorted(lines):
+            joined = "".join(t for _, t in sorted(lines[key]))
+            m = BAZIS_SKETCH_PAGE_RE.search(joined)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def index_bazis_sketch_pages(pdf_path):
+    """Возвращает ({номер эскиза: номер страницы}, номер заказа) для
+    распечатки эскизов Базиса. Номера страниц с 0 — как у pdfplumber."""
+    if not HAS_PDFPLUMBER:
+        return {}, None
+    pages = {}
+    order = None
+    with pdfplumber.open(pdf_path) as pdf:
+        for i, page in enumerate(pdf.pages):
+            text = page.extract_text() or ""
+            if order is None:
+                m = BAZIS_PDF_ORDER_RE.search(text)
+                if m:
+                    order = m.group(1)
+            no = _page_sketch_number(page)
+            if no is not None and no not in pages:
+                pages[no] = i
+    return pages, order
+
+
+def find_bazis_sketch_pdf(bln_path, order_number):
+    """PDF с эскизами рядом с .bln — в той же папке заказа. Отбираем по
+    номеру заказа в имени файла (Базис так и называет распечатку), а если
+    подходящих несколько — берём первый по алфавиту."""
+    if not order_number:
+        return None
+    folder = os.path.dirname(os.path.abspath(bln_path))
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return None
+    for name in names:
+        if not name.lower().endswith(".pdf"):
+            continue
+        digits = re.sub(r"\D", "", name)
+        if order_number in digits:
+            return os.path.join(folder, name)
+    return None
+
+
+def render_pdf_page(pdf_path, page_index, resolution=110):
+    """Страница PDF как PIL-картинка (для показа в окне "Просмотр")."""
+    with pdfplumber.open(pdf_path) as pdf:
+        return pdf.pages[page_index].to_image(resolution=resolution).original
+
+
+# ---------------------------------------------------------------------------
 # Интерфейс
 # ---------------------------------------------------------------------------
 
@@ -1351,6 +1466,221 @@ class LogDialog(ctk.CTkToplevel):
         self.after(900, lambda: self._copy_btn.configure(text="Скопировать логи"))
 
 
+class SketchReviewDialog(ctk.CTkToplevel):
+    """Просмотр эскизов заказа с отметкой "делаю сегодня".
+
+    Листаем строки стрелками, пробелом отмечаем те детали, которые идут в
+    работу. Отмеченные копируются (с пустой "Дата готовности" — её
+    пользователь заполняет сам), НЕотмеченные остаются серыми строками:
+    в таблице они есть — это отчётность, — но в буфер не идут.
+
+    Листаем именно СТРОКИ, а не страницы PDF: в буфер уходят строки, и
+    отметка всегда попадает в ту деталь, чьи данные видно рядом. Картинка
+    подставляется только там, где номер эскиза строки нашёлся в распечатке
+    (см. index_bazis_sketch_pages) — иначе показываем данные без чертежа,
+    но никогда чужую страницу.
+
+    Enter применяет отметки, Esc закрывает без изменений."""
+
+    IMG_BOX = (720, 760)  # в эту рамку вписывается страница эскиза
+
+    def __init__(self, master, colors, icon_images, theme, rows, pdf_path,
+                 pages_by_sketch, marked, on_apply):
+        super().__init__(master)
+        self.title("Просмотр эскизов")
+        self.configure(fg_color=colors["bg"])
+        self.transient(master)
+        _apply_window_icon(self, icon_images, theme)
+        set_windows_dark_titlebar(self, dark=(theme == "dark"))
+
+        self._colors = colors
+        self._rows = rows
+        self._pages = pages_by_sketch or {}
+        self._on_apply = on_apply
+        self._marked = set(marked or ())
+        self._idx = 0
+        self._img_cache = {}
+        self._ctk_img = None  # держим ссылку, иначе картинку соберёт сборщик мусора
+
+        # Документ держим открытым на всё время окна: с открытым PDF
+        # страница рисуется за ~20 мс, а на каждое открытие уходит ~0.9 с.
+        self._pdf = None
+        if pdf_path and HAS_PDFPLUMBER:
+            try:
+                self._pdf = pdfplumber.open(pdf_path)
+            except Exception:  # noqa: BLE001 — без картинок окно всё равно работает
+                self._pdf = None
+
+        content = ctk.CTkFrame(
+            self, fg_color=colors["card"], corner_radius=16,
+            border_width=1, border_color=colors["border"],
+        )
+        content.pack(fill="both", expand=True, padx=16, pady=16)
+
+        self._img_label = ctk.CTkLabel(
+            content, text="", width=self.IMG_BOX[0], height=self.IMG_BOX[1],
+            fg_color=colors["input"], corner_radius=12, text_color=colors["muted"],
+        )
+        self._img_label.pack(padx=20, pady=(20, 12))
+
+        self._part_var = tk.StringVar()
+        part_label = ctk.CTkLabel(
+            content, textvariable=self._part_var, text_color=colors["text"],
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        part_label.pack()
+
+        self._desc_var = tk.StringVar()
+        ctk.CTkLabel(
+            content, textvariable=self._desc_var, text_color=colors["muted"],
+        ).pack(pady=(2, 0))
+
+        self._state_var = tk.StringVar()
+        self._state_label = ctk.CTkLabel(
+            content, textvariable=self._state_var,
+            font=ctk.CTkFont(size=15, weight="bold"),
+        )
+        self._state_label.pack(pady=(10, 0))
+
+        self._counter_var = tk.StringVar()
+        ctk.CTkLabel(
+            content, textvariable=self._counter_var, text_color=colors["muted"],
+        ).pack(pady=(10, 0))
+
+        ctk.CTkLabel(
+            content, text="← → листать    ПРОБЕЛ отметить «делаю»    Enter применить    Esc отмена",
+            text_color=colors["muted"],
+        ).pack(pady=(8, 0))
+
+        btn_row = ctk.CTkFrame(content, fg_color=colors["card"])
+        btn_row.pack(pady=(12, 20))
+        ctk.CTkButton(
+            btn_row, text="◀", width=50, height=32, corner_radius=20,
+            command=lambda: self._step(-1), fg_color=colors["card"],
+            hover_color=colors["input"], text_color=colors["text"],
+            border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="Отметить (пробел)", width=180, height=32, corner_radius=20,
+            command=self._toggle, fg_color=colors["card"],
+            hover_color=colors["input"], text_color=colors["text"],
+            border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="▶", width=50, height=32, corner_radius=20,
+            command=lambda: self._step(1), fg_color=colors["card"],
+            hover_color=colors["input"], text_color=colors["text"],
+            border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 16))
+        ctk.CTkButton(
+            btn_row, text="Готово", width=120, height=32, corner_radius=20,
+            command=self._apply, fg_color=colors["accent"],
+            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
+        ).pack(side="left")
+
+        for seq, fn in (
+            ("<Left>", lambda e: self._step(-1)),
+            ("<Right>", lambda e: self._step(1)),
+            ("<Prior>", lambda e: self._step(-1)),
+            ("<Next>", lambda e: self._step(1)),
+            ("<space>", lambda e: self._toggle()),
+            ("<Return>", lambda e: self._apply()),
+            ("<Escape>", lambda e: self.destroy()),
+        ):
+            self.bind(seq, fn)
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self._show()
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+        y = max(master.winfo_rooty() - 40, 0)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        self.focus_force()
+
+    # --- показ -------------------------------------------------------------
+
+    def _page_image(self, page_index):
+        if page_index in self._img_cache:
+            return self._img_cache[page_index]
+        img = self._pdf.pages[page_index].to_image(resolution=110).original
+        box_w, box_h = self.IMG_BOX
+        scale = min(box_w / img.width, box_h / img.height, 1.0)
+        size = (max(int(img.width * scale), 1), max(int(img.height * scale), 1))
+        self._img_cache[page_index] = (img, size)
+        return self._img_cache[page_index]
+
+    def _show(self):
+        row = self._rows[self._idx]
+        colors = self._colors
+        # В строках таблицы номер детали лежит под "part" (разборщик отдаёт
+        # его как "part_code", _fill_results переименовывает) — читаем оба.
+        self._part_var.set(row.get("part") or row.get("part_code") or "(без номера)")
+        material = row.get("material") or ""
+        desc = row.get("description") or "(без названия)"
+        self._desc_var.set(f"{desc}    •    {material}" if material else desc)
+
+        # ВАЖНО: старую картинку отпускаем ТОЛЬКО ПОСЛЕ configure(). Если
+        # обнулить self._ctk_img раньше, сборщик мусора успевает удалить
+        # PhotoImage, на который ещё смотрит виджет, и тот падает с
+        # 'image "pyimageN" doesn't exist' на следующем же configure.
+        previous = self._ctk_img
+        page_index = self._pages.get(row.get("sketch_no"))
+        if self._pdf is not None and page_index is not None:
+            img, size = self._page_image(page_index)
+            new_img = ctk.CTkImage(light_image=img, dark_image=img, size=size)
+            self._img_label.configure(image=new_img, text="")
+        else:
+            new_img = None
+            no = row.get("sketch_no")
+            if self._pdf is None:
+                note = "Распечатка эскизов не найдена —\nрядом с .bln нет PDF этого заказа"
+            else:
+                note = (f"Эскиз {no} не найден в распечатке.\n"
+                        "Номер подписан на странице не текстом, а чертёжным шрифтом,\n"
+                        "поэтому связать её со строкой нельзя — решайте по данным ниже.")
+            self._img_label.configure(image="", text=note)
+        self._ctk_img = new_img
+        del previous
+
+        marked = self._idx in self._marked
+        self._state_var.set("✓ ДЕЛАЮ — копируется" if marked else "не отмечено — серая строка")
+        self._state_label.configure(text_color=SUCCESS_COLOR if marked else colors["muted"])
+        self._counter_var.set(
+            f"{self._idx + 1} из {len(self._rows)}    •    отмечено: {len(self._marked)}"
+        )
+
+    # --- действия ----------------------------------------------------------
+
+    def _step(self, delta):
+        self._idx = (self._idx + delta) % len(self._rows)
+        self._show()
+
+    def _toggle(self):
+        if self._idx in self._marked:
+            self._marked.discard(self._idx)
+        else:
+            self._marked.add(self._idx)
+        self._show()
+        # После отметки сразу к следующей — так проходится весь заказ
+        # одной рукой, без лишнего нажатия стрелки.
+        if self._idx < len(self._rows) - 1:
+            self._step(1)
+
+    def _apply(self):
+        self._on_apply(set(self._marked))
+        self.destroy()
+
+    def destroy(self):
+        if self._pdf is not None:
+            try:
+                self._pdf.close()
+            except Exception:  # noqa: BLE001 — окно всё равно закрываем
+                pass
+            self._pdf = None
+        super().destroy()
+
+
 class SketchExtractorApp:
     def __init__(self, root):
         self.root = root
@@ -1387,11 +1717,15 @@ class SketchExtractorApp:
 
         self.current_rows = []  # список dict-ов с результатами разбора
         self.current_kind = None  # "bazis" или "pdf"
+        self.current_path = None  # что разбирали последним (файл или папка дня)
         # Ручные переопределения из диалога "Что копировать":
         # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
         # Есть запись — воля пользователя побеждает; нет — используется
         # "auto_exclude" конкретной строки (см. _apply_row_styling).
         self.group_overrides = {}
+        # Отметки из окна "Просмотр" — {номер строки: копировать_ли}.
+        # Как и group_overrides, сбрасываются при новом разборе и "Очистить".
+        self.row_overrides = {}
         self._copy_selection_dialog = None
         # Столбцы для копирования — {имя_столбца: копировать_ли}, по умолчанию
         # все включены; отмечаются галочками прямо в шапке таблицы (см.
@@ -1680,6 +2014,14 @@ class SketchExtractorApp:
         self.clear_btn.pack(side="left", padx=(8, 0))
         self._reg(self.clear_btn, "secondary_button", surface="bg")
 
+        # Просмотр эскизов с отметкой "делаю" (см. SketchReviewDialog).
+        self.review_btn = ctk.CTkButton(
+            btn_frame, text="Просмотр эскизов", command=self.open_review_dialog,
+            height=32, width=180, corner_radius=20,
+        )
+        self.review_btn.pack(side="left", padx=(8, 0))
+        self._reg(self.review_btn, "secondary_button", surface="bg")
+
         # Журнал — отдельным окном по кнопке справа (см. LogDialog): под
         # таблицей он занимал место, а нужен редко.
         self.log_btn = ctk.CTkButton(
@@ -1697,6 +2039,50 @@ class SketchExtractorApp:
         # tk-окна, дальше по вложенности — нет (см. apply_theme).
         self._themed.append((widget, kind, surface))
         return widget
+
+    def open_review_dialog(self):
+        """Просмотр эскизов заказа с отметкой "делаю сегодня" (см.
+        SketchReviewDialog). Картинки берутся из распечатки эскизов Базиса,
+        если она лежит рядом с .bln."""
+        if not self.current_rows:
+            self.show_message("Нечего смотреть", "Сначала разберите файл.")
+            return
+
+        pdf_path, pages = None, {}
+        if self.current_kind == "bazis" and self.current_path and not self._parse_is_folder:
+            order = next(
+                (r.get("order") for r in self.current_rows if r.get("order")), None
+            )
+            pdf_path = find_bazis_sketch_pdf(self.current_path, order)
+            if pdf_path:
+                try:
+                    pages, pdf_order = index_bazis_sketch_pages(pdf_path)
+                except Exception as e:  # noqa: BLE001 — без картинок окно всё равно работает
+                    self.log(f"⚠ Не удалось прочитать распечатку эскизов {os.path.basename(pdf_path)}: {e}")
+                    pdf_path, pages = None, {}
+                else:
+                    if pdf_order and order and pdf_order != order:
+                        self.log(
+                            f"⚠ Распечатка эскизов {os.path.basename(pdf_path)} — от заказа "
+                            f"{pdf_order}, а разобран {order}. Картинки не показываю."
+                        )
+                        pdf_path, pages = None, {}
+
+        marked = {i for i, inc in self.row_overrides.items() if inc}
+        SketchReviewDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            self.current_rows, pdf_path, pages, marked, self._apply_review_marks,
+        )
+
+    def _apply_review_marks(self, marked):
+        """Отмеченные в "Просмотре" копируются, все остальные становятся
+        серыми — пользователь прошёл заказ и решил, что делает сегодня."""
+        self.row_overrides = {i: (i in marked) for i in range(len(self.current_rows))}
+        self._apply_row_styling()
+        self._refresh_copy_selection_dialog()
+        self.status_var.set(
+            f"Отмечено к копированию: {len(marked)} из {len(self.current_rows)}"
+        )
 
     def open_log_dialog(self):
         LogDialog(
@@ -1863,6 +2249,7 @@ class SketchExtractorApp:
         # Убирает ручные переопределения — состояние снова решает только
         # "auto_exclude" (то, что программа сама нашла при разборе файла).
         self.group_overrides = {}
+        self.row_overrides = {}
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
 
@@ -1874,8 +2261,17 @@ class SketchExtractorApp:
         self._refresh_copy_selection_dialog()
 
     def _apply_row_styling(self):
-        for iid, row in zip(self.tree.get_children(), self.current_rows):
-            included = self.group_overrides.get(self._row_group_key(row), not row["auto_exclude"])
+        # Приоритет: отметка из "Просмотра" по КОНКРЕТНОЙ строке → выбор по
+        # виду детали из "Что копировать" → автоматика разбора. Просмотр
+        # главнее вида: две одинаково названные детали (два "Гор. щит") в
+        # одном заказе бывают — одну делаем сегодня, вторую нет.
+        for i, (iid, row) in enumerate(zip(self.tree.get_children(), self.current_rows)):
+            if i in self.row_overrides:
+                included = self.row_overrides[i]
+            else:
+                included = self.group_overrides.get(
+                    self._row_group_key(row), not row["auto_exclude"]
+                )
             row["include"] = included
             self.tree.item(iid, tags=() if included else ("excluded",))
 
@@ -1995,6 +2391,7 @@ class SketchExtractorApp:
         self.current_rows = []
         self.current_kind = None
         self.group_overrides = {}
+        self.row_overrides = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
@@ -2086,7 +2483,9 @@ class SketchExtractorApp:
             self.tree.delete(row)
         self.current_rows = []
         self.current_kind = kind
+        self.current_path = path  # нужен "Просмотру": ищет PDF рядом с .bln
         self.group_overrides = {}
+        self.row_overrides = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
@@ -2129,7 +2528,8 @@ class SketchExtractorApp:
         """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
-        for btn in (self.browse_btn, self.browse_folder_btn, self.clear_btn, self.copy_btn):
+        for btn in (self.browse_btn, self.browse_folder_btn, self.clear_btn,
+                    self.copy_btn, self.review_btn):
             btn.configure(state=state)
 
     def _poll_parse(self, kind, path):
@@ -2251,6 +2651,9 @@ class SketchExtractorApp:
                 # их вручную через "Что копировать" (см. group_overrides).
                 "auto_exclude": auto_exclude,
                 "include": not auto_exclude,
+                # Только для окна "Просмотр": по нему ищется страница в
+                # распечатке эскизов. У .pdf его нет — будет None.
+                "sketch_no": item.get("sketch_no"),
             }
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
