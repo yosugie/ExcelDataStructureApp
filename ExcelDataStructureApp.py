@@ -92,6 +92,11 @@ SOURCE_TYPES = ("Базис", "inSight", "inSight (Базис)")
 # Основной станок пользователя — большинство деталей идёт на него.
 MACHINE_NAME = "Rover C9"
 
+# Соседний станок: часть деталей уходит туда. Пользователь отмечает их в
+# "Просмотре эскизов", и это название попадает в "Дата готовности" —
+# даты у такой детали не будет, её делают не здесь.
+OTHER_MACHINE_NAME = "B1650"
+
 # Откуда заказ — переключатель в карточке "Основное". От него зависит, что
 # вообще можно выбрать: у Базиса это папка дня ИЛИ один файл .bln, у inSight
 # только PDF-выгрузка (см. _build_main_card / on_source_mode_change).
@@ -111,6 +116,8 @@ KEYBIND_ACTIONS = (
     # Правый Alt — под большим пальцем рядом с пробелом: отметил деталь и
     # тут же кромку, не убирая руку.
     ("edge", "Отметить кромку", "<Alt_R>"),
+    # Правый Ctrl — в том же углу, что и правый Alt: рука не переезжает.
+    ("other", f"Отправить на {OTHER_MACHINE_NAME}", "<Control_R>"),
     ("prev", "Предыдущая деталь", "<Left>"),
     ("next", "Следующая деталь", "<Right>"),
     ("apply", "Применить и закрыть", "<Return>"),
@@ -508,8 +515,8 @@ def extract_material(stream):
 MATERIAL_THICKNESS_RE = re.compile(r"^\S+\s+(\d+)")
 
 # Материалы такой толщины (мм) станок не пилит — слишком тонкие. Такие
-# строки не копируются вообще (см. never_copy_reason), как и сборочные
-# чертежи со стеклом. Список легко расширить.
+# строки копируются как все, но в "Дата готовности" у них стоит пометка
+# "не обрабатывается" (см. not_processed_reason). Список легко расширить.
 NOT_MACHINABLE_THICKNESS_MM = {3, 4}
 
 
@@ -573,31 +580,38 @@ def is_mirror_part_name(description):
     return bool(description) and bool(MIRROR_NAME_RE.match(description))
 
 
-# Причины, по которым деталь НЕ МОЖЕТ пойти на станок физически — в отличие
-# от NOT_MACHINABLE_PART_NAMES (там это решение "на этом станке не делаем",
-# и пользователь вправе его переменить). Такие строки не копируются вообще
-# и вообще не показываются в "Просмотре эскизов" (см. never_copy_reason).
-NEVER_COPY_ASSEMBLY = "сборочный чертёж"
-NEVER_COPY_GLASS = "стекло/зеркало"
-# С подстановкой: толщин несколько (3 мм, 4 мм фанера), и в причине
+# Пометки для деталей, которые на станке не обрабатываются в принципе.
+# ВАЖНО: такие строки КОПИРУЮТСЯ как все остальные — в отчёте должно быть
+# столько же строк, сколько эскизов в заказе. Отличает их пометка в столбце
+# "Дата готовности": даты у них не будет никогда, и вместо неё стоит
+# причина. Текст короткий, потому что попадает прямо в ячейку Excel.
+NOT_PROCESSED_ASSEMBLY = "СБ"
+NOT_PROCESSED_GLASS = "Стекло"
+NOT_PROCESSED_MIRROR = "Зеркало"
+# С подстановкой: толщин несколько (3 мм ХДФ, 4 мм фанера), и в пометке
 # полезно видеть, какая именно у этой детали.
-NEVER_COPY_THIN = "толщина {} мм"
+NOT_PROCESSED_THIN = "Толщина {} мм"
 
 
-def never_copy_reason(is_assembly=False, material=None, description=None,
-                      thickness_mm=None):
-    """Почему деталь не идёт на станок в принципе, или None.
+def not_processed_reason(is_assembly=False, material=None, description=None,
+                         thickness_mm=None):
+    """Пометка "не обрабатывается" для столбца "Дата готовности", или None.
 
     Сборочный чертёж — вообще не деталь; стекло и зеркало станок не
     фрезерует; слишком тонкий материал (3 и 4 мм) он физически не пилит.
-    Ни одно из трёх не зависит от желания пользователя, поэтому такие
-    строки в буфер не попадают даже если отметить их руками."""
+    Ни одно из трёх не зависит от желания пользователя — поэтому пометку
+    ставит сама программа, а не пользователь в "Просмотре"."""
     if is_assembly:
-        return NEVER_COPY_ASSEMBLY
-    if is_glass_material(material) or is_mirror_part_name(description):
-        return NEVER_COPY_GLASS
+        return NOT_PROCESSED_ASSEMBLY
+    if is_mirror_part_name(description):
+        return NOT_PROCESSED_MIRROR
+    if is_glass_material(material):
+        # Зеркало ловится и по материалу ("Зеркало 4 б_цв на щит") — тогда
+        # пометка тоже должна быть про зеркало, а не про стекло.
+        return (NOT_PROCESSED_MIRROR if MIRROR_NAME_RE.match(material)
+                else NOT_PROCESSED_GLASS)
     if thickness_mm in NOT_MACHINABLE_THICKNESS_MM:
-        return NEVER_COPY_THIN.format(thickness_mm)
+        return NOT_PROCESSED_THIN.format(thickness_mm)
     return None
 
 
@@ -638,6 +652,8 @@ def not_machinable_warning(what_and_count):
 #   description         — название детали (столбец "Описание")
 #   material            — строка материала целиком
 #   auto_exclude        — программа сама считает, что деталь не идёт на станок
+#   not_processed       — пометка для "Дата готовности" ("СБ", "Стекло"...)
+#                         у деталей, которые на станке не обрабатываются
 # Только у .pdf (у .bln их просто нет, читать через .get()):
 #   extra_sketch, standard_blank_code, edge, nonstandard
 def parse_bln_sketches(bln_path):
@@ -732,7 +748,7 @@ def parse_bln_sketches(bln_path):
 
         is_excluded_name = is_excluded_part_name(description)
         # Название тут известно уже после DESC_RE — зеркало ловится и по нему.
-        blocked = never_copy_reason(is_assembly, material, description, thickness_mm)
+        not_processed = not_processed_reason(is_assembly, material, description, thickness_mm)
 
         if is_assembly:
             n_assembly += 1
@@ -770,7 +786,7 @@ def parse_bln_sketches(bln_path):
                 "description": description,
                 "material": material,
                 "auto_exclude": is_assembly or is_too_thin or is_excluded_name or is_glass,
-                "never_copy": blocked,
+                "not_processed": not_processed,
             })
 
     if n_not_machinable:
@@ -1479,8 +1495,8 @@ def parse_pdf_sketches(pdf_path):
                 "edge": edge,
                 "auto_exclude": is_too_thin or is_excluded_name or is_bad_diagonal or is_glass,
                 # Сборочных чертежей в выгрузке inSight не бывает — тут
-                # блокируют только стекло/зеркало и 3 мм.
-                "never_copy": never_copy_reason(
+                # помечаются только стекло/зеркало и тонкий материал.
+                "not_processed": not_processed_reason(
                     material=material, description=part_name, thickness_mm=thickness_mm),
             })
 
@@ -1754,7 +1770,7 @@ class CopySelectionDialog(ctk.CTkToplevel):
     закрывает окно — все изменения уже применяются сразу по клику."""
 
     def __init__(self, master, colors, icon_images, theme, counts, checked_state,
-                 locked, on_toggle, on_reset, on_select_all):
+                 hints, on_toggle, on_reset, on_select_all):
         super().__init__(master)
         self.title("Что копировать")
         self.resizable(False, False)
@@ -1785,7 +1801,7 @@ class CopySelectionDialog(ctk.CTkToplevel):
             scrollbar_button_hover_color=colors["muted"],
         )
         self._scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
-        self._build_checklist(counts, checked_state, locked)
+        self._build_checklist(counts, checked_state, hints)
 
         btn_row = ctk.CTkFrame(self._content, fg_color=colors["card"])
         btn_row.grid(row=2, column=0, pady=(0, 20))
@@ -1812,15 +1828,16 @@ class CopySelectionDialog(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
         self.grab_set()
 
-    def _build_checklist(self, counts, checked_state, locked):
+    def _build_checklist(self, counts, checked_state, hints):
         colors = self._colors
         # Порядок: отмеченные (то, что копируем) наверх, снятые ниже, а те,
-        # что не сделать физически, — в самый низ: выбирать там нечего.
+        # что программа считает не идущими на этот станок, — в конец каждой
+        # группы: их снимают чаще всего.
         items = sorted(
             counts.items(),
             key=lambda pair: (
-                pair[0] in locked,
                 not checked_state.get(pair[0], True),
+                pair[0] in hints,
                 (pair[0][0] or "").lower(),
                 (pair[0][1] or "").lower(),
             ),
@@ -1831,25 +1848,24 @@ class CopySelectionDialog(ctk.CTkToplevel):
             # разного материала это разные виды, и различить их можно
             # только по нему (см. SketchExtractorApp._row_group_key).
             label = f"{description or '(без названия)'} ({count})"
-            reason = locked.get(group_key)
-            if reason:
-                label += f"  —  не делаем: {reason}"
+            hinted = group_key in hints
+            if hinted:
+                label += "  —  не на этот станок"
             if material:
                 label += f"\n{material}"
             var = tk.BooleanVar(value=checked_state.get(group_key, True))
             ctk.CTkCheckBox(
                 self._scroll, text=label, variable=var,
-                text_color=colors["muted"] if reason else colors["text"],
+                text_color=colors["muted"] if hinted else colors["text"],
                 fg_color=colors["accent"], hover_color=colors["accent_hover"],
                 border_color=colors["border"],
-                state="disabled" if reason else "normal",
                 command=lambda k=group_key, v=var: self._on_toggle(k, v.get()),
             ).pack(anchor="w", pady=4, padx=4)
 
-    def refresh(self, counts, checked_state, locked):
+    def refresh(self, counts, checked_state, hints):
         for child in self._scroll.winfo_children():
             child.destroy()
-        self._build_checklist(counts, checked_state, locked)
+        self._build_checklist(counts, checked_state, hints)
 
 
 class OrderSelectionDialog(ctk.CTkToplevel):
@@ -2153,7 +2169,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
     INFO_WIDTH = 330           # колонка с данными детали справа от чертежа
 
     def __init__(self, master, colors, icon_images, theme, rows, sketch_index,
-                 marked, edges, keybinds, on_apply):
+                 marked, edges, others, keybinds, on_apply):
         super().__init__(master)
         self.title("Просмотр эскизов")
         self.configure(fg_color=colors["bg"])
@@ -2170,6 +2186,10 @@ class SketchReviewDialog(ctk.CTkToplevel):
         # пользователь сразу видит, кромим мы эту деталь или нет. В .bln
         # столбец "Кромка" иначе остаётся прочерком у всех строк.
         self._edges = set(edges or ())
+        # Детали, которые уходят на соседний станок: в "Дата готовности" у
+        # них встанет его название. С "в работу" взаимоисключающи — деталь
+        # либо наша, либо не наша.
+        self._others = set(others or ())
         self._keybinds = dict(keybinds or DEFAULT_KEYBINDS)
         self._idx = 0
         self._img_cache = {}
@@ -2253,7 +2273,16 @@ class SketchReviewDialog(ctk.CTkToplevel):
             border_color=colors["border"], text_color=colors["text"],
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self._edge_check.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 14))
+        self._edge_check.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 6))
+
+        self._other_var = tk.BooleanVar(value=False)
+        self._other_check = ctk.CTkCheckBox(
+            marks, text="", variable=self._other_var, command=self._toggle_other,
+            fg_color=colors["muted"], hover_color=colors["muted"],
+            border_color=colors["border"], text_color=colors["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self._other_check.grid(row=2, column=0, sticky="w", padx=14, pady=(0, 14))
 
         self._counter_var = tk.StringVar()
         ctk.CTkLabel(
@@ -2291,6 +2320,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
         actions = {
             "work": lambda e: self._toggle(),
             "edge": lambda e: self._toggle_edge(),
+            "other": lambda e: self._toggle_other(),
             "prev": lambda e: self._step(-1),
             "next": lambda e: self._step(1),
             "apply": lambda e: self._apply(),
@@ -2420,12 +2450,14 @@ class SketchReviewDialog(ctk.CTkToplevel):
 
         self._work_var.set(self._idx in self._marked)
         self._edge_var.set(self._idx in self._edges)
+        self._other_var.set(self._idx in self._others)
         self._refresh_captions()
 
         with_img = sum(1 for r in self._rows if self._sketch_for_row(r) is not None)
         self._counter_var.set(
             f"{self._idx + 1} из {len(self._rows)}    •    в работе: {len(self._marked)}\n"
-            f"кромка: {len(self._edges)}    •    с чертежом: {with_img}"
+            f"кромка: {len(self._edges)}    •    {OTHER_MACHINE_NAME}: {len(self._others)}"
+            f"    •    с чертежом: {with_img}"
         )
 
     def _refresh_captions(self):
@@ -2436,8 +2468,10 @@ class SketchReviewDialog(ctk.CTkToplevel):
         next_key = key_caption(self._keybinds.get("next", DEFAULT_KEYBINDS["next"]))
         apply_key = key_caption(self._keybinds.get("apply", DEFAULT_KEYBINDS["apply"]))
         cancel_key = key_caption(self._keybinds.get("cancel", DEFAULT_KEYBINDS["cancel"]))
+        other_key = key_caption(self._keybinds.get("other", DEFAULT_KEYBINDS["other"]))
         self._work_check.configure(text=f"В работу   ({work_key})")
         self._edge_check.configure(text=f"Кромка «Есть»   ({edge_key})")
+        self._other_check.configure(text=f"На {OTHER_MACHINE_NAME}   ({other_key})")
         self._hint_var.set(
             f"{prev_key} {next_key}  листать      {apply_key}  применить\n"
             f"{cancel_key}  отмена      F11  во весь экран"
@@ -2459,6 +2493,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
             self._marked.discard(self._idx)
         else:
             self._marked.add(self._idx)
+            self._others.discard(self._idx)  # либо наша деталь, либо не наша
         self._show()
         # После отметки сразу к следующей — так проходится весь заказ
         # одной рукой, без лишнего нажатия стрелки. На последней стоим.
@@ -2474,8 +2509,20 @@ class SketchReviewDialog(ctk.CTkToplevel):
             self._edges.add(self._idx)
         self._show()
 
+    def _toggle_other(self):
+        """Деталь уходит на соседний станок. Как и "в работу", это решение
+        по детали — поэтому листаем дальше; и как и там, оно
+        взаимоисключающе с "в работу"."""
+        if self._idx in self._others:
+            self._others.discard(self._idx)
+        else:
+            self._others.add(self._idx)
+            self._marked.discard(self._idx)
+        self._show()
+        self._step(1)
+
     def _apply(self):
-        self._on_apply(set(self._marked), set(self._edges))
+        self._on_apply(set(self._marked), set(self._edges), set(self._others))
         self.destroy()
 
 
@@ -2530,16 +2577,16 @@ class SketchExtractorApp:
         self.order_dir_paths = {}
         # Ручные переопределения из диалога "Что копировать":
         # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
-        # Есть запись — воля пользователя побеждает; нет — используется
-        # "auto_exclude" конкретной строки (см. _apply_row_styling).
+        # Единственное, что вообще снимает строку с копирования: по
+        # умолчанию копируются все (см. _apply_row_styling).
         self.group_overrides = {}
-        # Отметки из окна "Просмотр" — {номер строки: копировать_ли}.
-        # Как и group_overrides, сбрасываются при новом разборе и "Очистить".
-        self.row_overrides = {}
         # Номера строк таблицы, показанных в последнем "Просмотре": окно
-        # живёт позициями в своём списке, а строки без never_copy туда не
-        # попадают вовсе (см. open_review_dialog).
+        # живёт позициями в своём списке, а детали с пометкой
+        # "не обрабатывается" туда не попадают (см. open_review_dialog).
         self._review_rows = []
+        # {номер строки: отмечена ли "в работу"} из последнего просмотра —
+        # нужно только чтобы при повторном открытии галочки стояли как были.
+        self._review_marked = {}
         self._copy_selection_dialog = None
         # Столбцы для копирования — {имя_столбца: копировать_ли}, по умолчанию
         # все включены; отмечаются галочками прямо в шапке таблицы (см.
@@ -2959,19 +3006,19 @@ class SketchExtractorApp:
             if keys_unused:
                 self.log("⚠ Чертежи, не подошедшие ни к одной строке: " + _short_list(keys_unused))
 
-        # Детали, которые не сделать физически (сборка, стекло/зеркало,
-        # тонкий материал), в просмотр не попадают вовсе: решать по ним
-        # нечего, а листать лишние чертежи — только время терять. В таблице
-        # они, конечно, остаются — это отчётность.
+        # Детали, которые на станке не обрабатываются (сборка, стекло/
+        # зеркало, тонкий материал), в просмотр не попадают: решать по ним
+        # нечего — пометку в "Дата готовности" программа поставила сама.
+        # В таблицу и в буфер они при этом идут как все.
         self._review_rows = [i for i, row in enumerate(self.current_rows)
-                             if not row.get("never_copy")]
+                             if not row.get("not_processed")]
         hidden = len(self.current_rows) - len(self._review_rows)
         if hidden:
-            self.log(f"В просмотр не попали (не идут в работу): {hidden}")
+            self.log(f"В просмотр не попали (не обрабатываются): {hidden}")
         if not self._review_rows:
             self.show_message(
                 "Нечего смотреть",
-                "Все детали этого заказа не идут в работу "
+                "Ни одна деталь этого заказа не обрабатывается на станке "
                 "(сборка, стекло/зеркало, тонкий материал).",
             )
             return
@@ -2980,44 +3027,63 @@ class SketchExtractorApp:
         # списке; обратно в номера строк таблицы их переводит
         # _apply_review_marks по self._review_rows.
         rows = [self.current_rows[i] for i in self._review_rows]
-        marked = {pos for pos, i in enumerate(self._review_rows)
-                  if self.row_overrides.get(i)}
-        # Уже проставленную кромку показываем отмеченной: в PDF inSight она
-        # берётся из кода эскиза (R00x/P00x), и снимать её заново незачем.
-        edges = {pos for pos, i in enumerate(self._review_rows)
-                 if self.current_rows[i].get("edge") == EDGE_YES}
+        # Что уже отмечено, показываем отмеченным: кромка у inSight берётся
+        # из кода эскиза (R00x/P00x), а B1650 мог остаться с прошлого
+        # просмотра — снимать их заново незачем.
+        marked, edges, others = set(), set(), set()
+        for pos, i in enumerate(self._review_rows):
+            row = self.current_rows[i]
+            if row.get("edge") == EDGE_YES:
+                edges.add(pos)
+            if row.get("ready_date") == OTHER_MACHINE_NAME:
+                others.add(pos)
+            elif self._review_marked.get(i):
+                marked.add(pos)
         SketchReviewDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            rows, index, marked, edges, self.keybinds,
+            rows, index, marked, edges, others, self.keybinds,
             self._apply_review_marks,
         )
 
-    def _apply_review_marks(self, marked, edges):
-        """Отмеченные в "Просмотре" копируются, все остальные становятся
-        серыми — пользователь прошёл заказ и решил, что берёт в работу.
-        Заодно оттуда же приходит кромка: её видно на самом чертеже.
+    def _apply_review_marks(self, marked, edges, others):
+        """Отметки из "Просмотра" ложатся в столбцы таблицы.
 
-        marked/edges — позиции в списке показанных строк (см.
+        Строки НЕ исключаются из копирования — в отчёте должно быть столько
+        строк, сколько эскизов. Отметки только подписывают:
+          "в работу"  -> "Дата готовности" пустая, дату пользователь
+                         поставит сам в Excel;
+          B1650       -> туда же название соседнего станка: даты не будет,
+                         деталь делают не здесь;
+          кромка      -> "Есть" в столбце "Кромка".
+
+        marked/edges/others — позиции в списке показанных строк (см.
         open_review_dialog), переводим их в номера строк таблицы."""
         shown = self._review_rows
         marked_rows = {shown[pos] for pos in marked if pos < len(shown)}
         edge_rows = {shown[pos] for pos in edges if pos < len(shown)}
-        # never_copy сюда не попадает вовсе: такие строки не копируются при
-        # любой отметке, и _apply_row_styling это учитывает отдельно.
-        self.row_overrides = {i: (i in marked_rows) for i in shown}
+        other_rows = {shown[pos] for pos in others if pos < len(shown)}
+        self._review_marked = {i: (i in marked_rows) for i in shown}
+
         edge_idx = self.columns.index("edge")
+        ready_idx = self.columns.index("ready_date")
         for i, (iid, row) in enumerate(zip(self.tree.get_children(), self.current_rows)):
-            if i not in self.row_overrides:
-                continue  # строку не показывали — её кромку не трогаем
+            if i not in self._review_marked:
+                continue  # строку не показывали — её пометки не трогаем
             row["edge"] = EDGE_YES if i in edge_rows else "-"
+            if i in other_rows:
+                row["ready_date"] = OTHER_MACHINE_NAME
+            elif row["ready_date"] == OTHER_MACHINE_NAME:
+                row["ready_date"] = ""  # сняли отметку — убираем и пометку
             values = list(self.tree.item(iid, "values"))
             values[edge_idx] = row["edge"]
+            values[ready_idx] = row["ready_date"]
             self.tree.item(iid, values=values)
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
         self.status_var.set(
             f"В работу: {len(marked_rows)} из {len(shown)}    •    "
-            f"кромка: {len(edge_rows)}"
+            f"кромка: {len(edge_rows)}    •    "
+            f"{OTHER_MACHINE_NAME}: {len(other_rows)}"
         )
 
     def open_log_dialog(self):
@@ -3151,39 +3217,31 @@ class SketchExtractorApp:
         return (row["description"], row["material"])
 
     def _copy_selection_counts_and_state(self):
+        """Виды деталей для диалога "Что копировать" и состояние галочек.
+
+        ВСЕ виды отмечены по умолчанию: в отчёте должно быть столько строк,
+        сколько эскизов в заказе (см. copy_for_table). Диалог остался
+        РУЧНЫМ инструментом — снять вид, если он зачем-то не нужен именно
+        сейчас; сам по себе он ничего не снимает."""
         counts = {}
-        all_auto_included = {}
-        # Виды, которые не сделать физически (сборка, стекло/зеркало, 3 мм):
-        # галочка у них заблокирована — переключать нечего.
-        self._locked_groups = {}
         for row in self.current_rows:
             key = self._row_group_key(row)
             counts[key] = counts.get(key, 0) + 1
-            included = not row["auto_exclude"]
-            all_auto_included[key] = all_auto_included.get(key, True) and included
-            if row.get("never_copy"):
-                self._locked_groups[key] = row["never_copy"]
-        # Галочка снята по умолчанию, если хоть одну строку этого вида
-        # программа сама исключила (или так выбрано вручную ранее) — но пока
-        # пользователь не кликнет по галочке сам, это только для наглядности
-        # в диалоге и не трогает состояние отдельных строк (см.
-        # _apply_row_styling — там в силе остаётся "auto_exclude" каждой
-        # строки, если явного выбора для этого вида ещё не было).
-        checked_state = {
-            key: False if key in self._locked_groups
-            else self.group_overrides.get(key, all_auto_included[key])
-            for key in counts
-        }
-        return counts, checked_state, dict(self._locked_groups)
+        checked_state = {key: self.group_overrides.get(key, True) for key in counts}
+        # Виды, которые программа считает не идущими на станок, — подсказка
+        # глазу: в диалоге они уходят вниз списка, но галочка снята НЕ будет.
+        hints = {self._row_group_key(row) for row in self.current_rows
+                 if row["auto_exclude"]}
+        return counts, checked_state, hints
 
     def open_copy_selection_dialog(self):
         if not self.current_rows:
             self.show_message("Нечего показывать", "Сначала разберите файл.")
             return
-        counts, checked_state, locked = self._copy_selection_counts_and_state()
+        counts, checked_state, hints = self._copy_selection_counts_and_state()
         self._copy_selection_dialog = CopySelectionDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            counts, checked_state, locked, self.toggle_group_copying,
+            counts, checked_state, hints, self.toggle_group_copying,
             self.reset_copy_selection_to_auto, self.select_all_for_copying,
         )
 
@@ -3196,42 +3254,34 @@ class SketchExtractorApp:
         self._apply_row_styling()
 
     def reset_copy_selection_to_auto(self):
-        # Убирает ручные переопределения — состояние снова решает только
-        # "auto_exclude" (то, что программа сама нашла при разборе файла).
+        # Убирает ручные переопределения — копируется снова всё подряд.
         self.group_overrides = {}
-        self.row_overrides = {}
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
 
     def select_all_for_copying(self):
-        # Отмечает вообще все виды — временно копируется всё, включая то,
-        # что программа сама считает не идущим на станок. Кроме того, что не
-        # сделать физически (never_copy): его "все" не касается.
         self.group_overrides = {
             self._row_group_key(row): True for row in self.current_rows
-            if not row.get("never_copy")
         }
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
 
     def _apply_row_styling(self):
-        # Приоритет: физическая невозможность (never_copy — сборка, стекло/
-        # зеркало, 3 мм) → отметка из "Просмотра" по КОНКРЕТНОЙ строке →
-        # выбор по виду детали из "Что копировать" → автоматика разбора.
-        # Просмотр главнее вида: две одинаково названные детали (два "Гор.
-        # щит") в одном заказе бывают — одну делаем, вторую нет. А never_copy
-        # главнее всего: станок такую деталь не сделает при любом желании.
-        for i, (iid, row) in enumerate(zip(self.tree.get_children(), self.current_rows)):
-            if row.get("never_copy"):
-                included = False
-            elif i in self.row_overrides:
-                included = self.row_overrides[i]
-            else:
-                included = self.group_overrides.get(
-                    self._row_group_key(row), not row["auto_exclude"]
-                )
+        """Что копируется и что красится серым.
+
+        Копируется ВСЁ, кроме видов, снятых вручную в "Что копировать": в
+        отчёте должно быть столько строк, сколько эскизов в заказе. Серым
+        красится другое — строки, которые не идут на этот станок
+        ("auto_exclude" или пометка "не обрабатывается"/B1650 в "Дата
+        готовности"), и отдельно снятые виды. Это подсказка глазу, а не
+        признак "не скопируется"."""
+        not_ours = {OTHER_MACHINE_NAME}
+        for iid, row in zip(self.tree.get_children(), self.current_rows):
+            included = self.group_overrides.get(self._row_group_key(row), True)
             row["include"] = included
-            self.tree.item(iid, tags=() if included else ("excluded",))
+            grey = (not included or row["auto_exclude"]
+                    or row.get("not_processed") or row["ready_date"] in not_ours)
+            self.tree.item(iid, tags=("excluded",) if grey else ())
 
     def toggle_column_copying(self, column):
         """Клик по шапке столбца — снять/поставить галочку копирования."""
@@ -3351,7 +3401,8 @@ class SketchExtractorApp:
         self.current_kind = None
         self.order_dir_paths = {}
         self.group_overrides = {}
-        self.row_overrides = {}
+        self._review_rows = []
+        self._review_marked = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
@@ -3598,7 +3649,8 @@ class SketchExtractorApp:
         self.current_path = path  # нужен "Просмотру": ищет PDF рядом с .bln
         self.order_dir_paths = {}
         self.group_overrides = {}
-        self.row_overrides = {}
+        self._review_rows = []
+        self._review_marked = {}
         if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
             self._copy_selection_dialog.destroy()
         self._set_empty_state(False)
@@ -3760,11 +3812,12 @@ class SketchExtractorApp:
             order_for_row = item["order_from_content"] or order_number or missing_marker
             part_for_row = item["part_code"] or missing_marker
             blank_code = item.get("standard_blank_code")
-            # "never_copy" — причина, по которой деталь не сделать физически
-            # (сборка, стекло/зеркало, 3 мм). Такая строка серая всегда и в
-            # буфер не попадает даже при ручной отметке (_apply_row_styling).
-            blocked = item.get("never_copy")
-            auto_exclude = bool(item.get("auto_exclude")) or bool(blocked)
+            # "not_processed" — пометка для "Дата готовности" у деталей,
+            # которые на станке не обрабатываются (сборка, стекло/зеркало,
+            # тонкий материал). Строка при этом КОПИРУЕТСЯ как все: в отчёте
+            # должно быть столько строк, сколько эскизов в заказе.
+            not_processed = item.get("not_processed")
+            auto_exclude = bool(item.get("auto_exclude")) or bool(not_processed)
             row = {
                 "date": current_date,
                 "order": order_for_row,
@@ -3779,27 +3832,28 @@ class SketchExtractorApp:
                 # листу, а не к названию детали. Не найдена (или для .bln,
                 # где её вообще не бывает) — тоже прочерк "-".
                 "nonstandard": "Нестандарт" if item.get("nonstandard") else "-",
-                # Код стандартной заготовки ("R061") или параметрической
-                # программы ("P004") вместо даты — единственное исключение из
-                # правила "программа никогда не пишет в Дата готовности",
-                # иначе всегда пусто (заполняется пользователем в Excel по
-                # мере выполнения заказа).
-                "ready_date": blank_code or "",
+                # "Дата готовности" — на самом деле столбец "когда будет
+                # готово ИЛИ почему даты не будет". Пользователь заполняет
+                # дату сам в Excel, а программа пишет туда пометку, когда
+                # даты не будет никогда. Приоритет: "не обрабатывается"
+                # (СБ/Стекло/Зеркало/Толщина) → код готовой программы
+                # ("R061"/"P004", только inSight) → пусто. Ещё одну пометку
+                # ставит пользователь в "Просмотре" — B1650, соседний станок
+                # (см. _apply_review_marks).
+                "ready_date": not_processed or blank_code or "",
                 # Кромка — "Есть" только там, где заранее точно известно, что
                 # кромим (см. PARAMETRIC_PROGRAMS), у всех остальных прочерк:
                 # пользователь выбирает сам из выпадающего списка в Excel
                 # ("Есть"/"Нет"/"-"), а прочерк — его же третий вариант, так
                 # что список это не ломает.
                 "edge": item.get("edge") or "-",
-                # Своё "auto_exclude" на КАЖДОЙ строке (а не на весь вид
-                # детали разом) — так у двух одинаково названных деталей с
-                # разным материалом (например "Стенка задняя" из ЛДСП 16 и
-                # "Стенка задняя" из ХДФ 3мм в одном заказе) не совпадает
-                # состояние исключения, пока пользователь сам не сгруппирует
-                # их вручную через "Что копировать" (см. group_overrides).
+                # "auto_exclude" теперь только подсказка глазу: строка
+                # красится серым. На копирование он НЕ влияет — копируются
+                # все строки, кроме снятых вручную в "Что копировать"
+                # (см. _apply_row_styling).
                 "auto_exclude": auto_exclude,
-                "never_copy": blocked,
-                "include": not auto_exclude,
+                "not_processed": not_processed,
+                "include": True,
             }
             self.tree.insert("", tk.END, values=(
                 row["date"], row["order"], row["part"],
@@ -3823,11 +3877,13 @@ class SketchExtractorApp:
             self.show_message("Нечего копировать", "Сначала разберите файл.")
             return
 
-        # Какие столбцы вообще копируем — см. "Столбцы для копирования"
-        # (self.column_selection), отдельно от того, какие СТРОКИ копируем
-        # (row["include"], см. "Что копировать" выше). Порядок столбцов в
-        # буфере — тот же, что и в самой таблице (self.columns), просто с
-        # пропуском снятых.
+        # СТРОКИ копируются ВСЕ: в отчёте должно быть столько строк,
+        # сколько эскизов в заказе. Единственное, что может снять строку, —
+        # снятый вручную вид детали в "Что копировать" (row["include"], см.
+        # _apply_row_styling). Какие СТОЛБЦЫ копировать — отдельная
+        # настройка (self.column_selection); порядок столбцов в буфере тот
+        # же, что и в самой таблице (self.columns), просто с пропуском
+        # снятых.
         selected_columns = [c for c in self.columns if self.column_selection.get(c, True)]
         if not selected_columns:
             self.show_message(
@@ -3859,7 +3915,15 @@ class SketchExtractorApp:
         text = "\n".join("\t".join(values) for values in row_values)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self.log(f"Строк скопировано: {len(row_values)}")
+        # Пишем обе цифры: пользователь сверяет "сколько эскизов получил за
+        # день — столько же строк в отчёте".
+        if len(row_values) == len(self.current_rows):
+            self.log(f"Строк скопировано: {len(row_values)} — все строки разбора")
+        else:
+            self.log(
+                f"Строк скопировано: {len(row_values)} из {len(self.current_rows)} "
+                f'(часть видов снята в "Что копировать")'
+            )
         self.status_var.set(f"Скопировано в буфер: {len(row_values)} строк")
         self.flash_copy_button()
         self._mark_copied_orders({row["order"] for row in self.current_rows if row["include"]})
