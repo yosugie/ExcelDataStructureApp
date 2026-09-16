@@ -2690,9 +2690,11 @@ class SketchExtractorApp:
         stage_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         stage_row.pack(fill="x", padx=16, pady=(10, 14))
         self._reg(stage_row, "plain_frame")
-        stage_label = ctk.CTkLabel(stage_row, text="Этапы:", width=label_width, anchor="w")
-        stage_label.pack(side="left")
-        self._reg(stage_label, "label")
+        # Ярлык и обе кнопки прячутся целиком в режиме inSight — там этапов
+        # нет (см. on_source_mode_change), поэтому держим их под рукой.
+        self.stage_label = ctk.CTkLabel(stage_row, text="Этапы:", width=label_width, anchor="w")
+        self.stage_label.pack(side="left")
+        self._reg(self.stage_label, "label")
 
         self.mark_btn = ctk.CTkButton(
             stage_row, text="Отсортировать заказы",
@@ -3351,9 +3353,13 @@ class SketchExtractorApp:
         self.run_parse()
 
     def on_source_mode_change(self, choice=None):
-        """Переключатель "Базис / inSight". У Базиса два способа выбора —
-        папка дня и один заказ, у inSight только PDF-выгрузка, и этап
-        сортировки там не нужен вовсе."""
+        """Переключатель "Базис / inSight".
+
+        У Базиса два способа выбора (папка дня и один заказ) и оба этапа.
+        У inSight ни того, ни другого: там одна PDF-выгрузка, которая
+        разбирается сразу при выборе, сортировать нечего, а "Просмотр
+        эскизов" работает по отдельным файлам эскизов Базиса. Поэтому всё
+        лишнее не гасим, а убираем совсем — чтобы не мозолило глаза."""
         bazis = self.mode_var.get() == SOURCE_BAZIS
         if bazis:
             self.path_label.configure(text="Папка дня или заказ:")
@@ -3363,9 +3369,15 @@ class SketchExtractorApp:
             self.path_label.configure(text="Файл PDF:")
             self.browse_day_btn.pack_forget()
             self.browse_btn.configure(text="Выбрать PDF...")
-        self.mark_btn.configure(state="normal" if bazis else "disabled")
-        self.parse_btn.configure(
-            text="Разобрать и отметить" if bazis else "Разобрать PDF")
+
+        for widget in (self.stage_label, self.mark_btn, self.parse_btn, self.review_btn):
+            widget.pack_forget()
+        if bazis:
+            # Порядок важен: pack кладёт слева направо в порядке вызовов.
+            self.stage_label.pack(side="left")
+            self.mark_btn.pack(side="left")
+            self.parse_btn.pack(side="left", padx=(8, 0))
+            self.review_btn.pack(side="left", padx=(8, 0), after=self.clear_btn)
 
     def browse_day_folder(self):
         """Папка дня со всеми заказами Базиса. Сразу не разбираем: дальше
@@ -3612,15 +3624,11 @@ class SketchExtractorApp:
         """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
-        for btn in (self.browse_btn, self.browse_day_btn, self.parse_btn,
-                    self.clear_btn, self.copy_btn, self.review_btn):
+        # Кнопки этапов и "Просмотр эскизов" у inSight вообще убраны с окна
+        # (см. on_source_mode_change) — гасить их всё равно безвредно.
+        for btn in (self.browse_btn, self.browse_day_btn, self.mark_btn,
+                    self.parse_btn, self.clear_btn, self.copy_btn, self.review_btn):
             btn.configure(state=state)
-        # Первый этап только для папки дня — в режиме одного заказа кнопка
-        # и так погашена (см. on_source_mode_change), не включаем её обратно.
-        if not busy and self.mode_var.get() != SOURCE_BAZIS:
-            self.mark_btn.configure(state="disabled")
-        else:
-            self.mark_btn.configure(state=state)
 
     def _poll_parse(self, kind, path):
         try:
