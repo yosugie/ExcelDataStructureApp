@@ -1523,7 +1523,9 @@ def render_sketch_page(path, page_index, box):
         page = doc[page_index]
         w, h = page.get_size()
         scale = min(box[0] / w, box[1] / h) if w and h else 1.0
-        return page.render(scale=max(scale, 0.1)).to_pil()
+        # Верхний предел — чтобы на развёрнутом окне не рисовать гигантский
+        # растр ради мелкого листа; нижний — чтобы вообще что-то нарисовать.
+        return page.render(scale=min(max(scale, 0.1), 5.0)).to_pil()
     finally:
         doc.close()
 
@@ -1953,7 +1955,13 @@ class SketchReviewDialog(ctk.CTkToplevel):
             text_color=colors["muted"],
         )
         self._img_label.grid(row=0, column=0, sticky="nsew", padx=(16, 12), pady=16)
-        self._img_label.bind("<Configure>", self._on_img_resize)
+        # ВАЖНО: размер рамки под чертёж считаем от САМОГО ОКНА, а не от
+        # этого лейбла. CTkLabel.bind() вешает обработчик на внутренние
+        # виджеты, и один из них — тот, что держит картинку: его <Configure>
+        # приходит с размером САМОЙ КАРТИНКИ. Из-за этого рамка схлопывалась
+        # обратно к минимуму сразу после первой отрисовки, и чертёж
+        # оставался крошечным на весь развёрнутый экран.
+        self.bind("<Configure>", self._on_window_resize)
 
         side = ctk.CTkFrame(self, fg_color=colors["bg"], width=self.INFO_WIDTH)
         side.grid(row=0, column=1, sticky="ns", padx=(0, 16), pady=16)
@@ -2037,6 +2045,11 @@ class SketchReviewDialog(ctk.CTkToplevel):
         ):
             self.bind(seq, fn)
 
+        # Размер окна уже известен (его задал _go_maximized), но виджеты ещё
+        # не разложены — дожидаемся раскладки и только потом считаем рамку,
+        # иначе первый чертёж нарисовался бы по минимальному размеру.
+        self.update_idletasks()
+        self._img_box = self._box_for_window()
         self._show()
         self.grab_set()
         self.focus_force()
@@ -2078,12 +2091,24 @@ class SketchReviewDialog(ctk.CTkToplevel):
             pass
         self.destroy()
 
-    def _on_img_resize(self, event):
+    def _box_for_window(self, width=None, height=None):
+        """Рамка под чертёж по размеру окна: всё, что осталось от колонки с
+        данными и отступов. Считаем от окна, а не от лейбла с картинкой —
+        см. комментарий у bind("<Configure>") выше."""
+        width = width or self.winfo_width()
+        height = height or self.winfo_height()
+        return (max(width - self.INFO_WIDTH - 60, self.MIN_IMG_BOX[0]),
+                max(height - 56, self.MIN_IMG_BOX[1]))
+
+    def _on_window_resize(self, event):
         """Чертёж перерисовываем под новый размер окна, но не на каждый пиксель
         тягания рамки: пересчёт идёт через таймер и только при заметном
         изменении, иначе окно дёргается."""
-        box = (max(event.width - 24, self.MIN_IMG_BOX[0]),
-               max(event.height - 24, self.MIN_IMG_BOX[1]))
+        if event.widget is not self:
+            # <Configure> вложенных виджетов доходит и сюда (окно есть в их
+            # bindtags) — размеры оттуда к рамке чертежа отношения не имеют.
+            return
+        box = self._box_for_window(event.width, event.height)
         if abs(box[0] - self._img_box[0]) < 40 and abs(box[1] - self._img_box[1]) < 40:
             return
         self._img_box = box
