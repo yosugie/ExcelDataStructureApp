@@ -682,14 +682,21 @@ def _bln_files_in(directory):
 # пользователя всегда в начале имени):
 #   "217205 ❌ ГСС ООО Тумба под раковину тип 236" — эскизов нет, заказ не мой;
 #   "217205 ➜ ГСС ООО Тумба под раковину тип 236" — эскизы есть, заказ в работу;
+#   "217205 ❓ ГСС ООО Тумба под раковину тип 236" — библиотека не читается,
+#       посмотреть заказ руками (см. MARK_CHECK ниже);
 #   "217205 • ГСС ООО Тумба под раковину тип 236" — строки уже скопированы.
 # Смысл в том, чтобы не открывать каждый заказ руками: видно прямо в
 # проводнике. Метка ВСЕГДА одна — ставя новую, старую убираем
 # (см. set_order_mark), иначе после второго прогона вышло бы "217205 ➜ ➜ ...".
 MARK_NO_SKETCHES = "❌"
 MARK_HAS_SKETCHES = "➜"
+# Отдельно от "❌": там программа точно знает, что эскизов нет, а тут она
+# просто не смогла прочесть .bln (битый файл, другая версия формата, файл
+# занят). Сваливать это в "❌" нельзя — заказ выглядел бы как ненужный,
+# хотя эскизы в нём вполне могут быть.
+MARK_CHECK = "❓"
 MARK_DONE = "•"
-ORDER_MARKS = (MARK_NO_SKETCHES, MARK_HAS_SKETCHES, MARK_DONE)
+ORDER_MARKS = (MARK_NO_SKETCHES, MARK_HAS_SKETCHES, MARK_CHECK, MARK_DONE)
 
 # Папка заказа = имя начинается с номера заказа (5-7 цифр). Всё, что на это
 # не похоже, метками не трогаем вообще: в папке дня может лежать что угодно.
@@ -820,6 +827,11 @@ def mark_order_folders(day_dir):
     либо уже выгружены в папку заказа в PDF, либо лежат внутри .bln. Если
     нет нигде — метка ❌, такой заказ можно не открывать вообще.
 
+    Если .bln прочесть не удалось (битый файл, другая версия формата, файл
+    занят) — метка ❓: посмотреть этот заказ руками. Отдельно от ❌ именно
+    потому, что "эскизов нет" и "не смог посмотреть" — разные вещи, и во
+    втором случае эскизы вполне могут быть.
+
     Папки, уже помеченные "•" (заказ разнесён по таблице), не трогаем —
     иначе после копирования они снова становились бы "➜", и было бы
     непонятно, сделан заказ или нет.
@@ -833,8 +845,8 @@ def mark_order_folders(day_dir):
 
     warnings = []
     items = []
-    stats = {"with_sketches": 0, "without_sketches": 0, "already_done": 0,
-             "renamed": 0, "not_order_dirs": 0}
+    stats = {"with_sketches": 0, "without_sketches": 0, "unreadable": 0,
+             "already_done": 0, "renamed": 0, "not_order_dirs": 0}
 
     for name in entries:
         src = os.path.join(day_dir, name)
@@ -849,6 +861,7 @@ def mark_order_folders(day_dir):
             continue
 
         has_sketches = bool(find_sketch_pdfs_for_order(src))
+        unreadable = False
         if not has_sketches:
             for bln_path in _bln_files_in(src):
                 try:
@@ -856,12 +869,19 @@ def mark_order_folders(day_dir):
                         has_sketches = True
                         break
                 except Exception as e:  # noqa: BLE001 — битый файл не ломает остальные
+                    unreadable = True
                     warnings.append(
                         f'{name}: не удалось заглянуть в "{os.path.basename(bln_path)}" — {e}'
                     )
 
-        mark = MARK_HAS_SKETCHES if has_sketches else MARK_NO_SKETCHES
-        stats["with_sketches" if has_sketches else "without_sketches"] += 1
+        if has_sketches:
+            mark, key = MARK_HAS_SKETCHES, "with_sketches"
+        elif unreadable:
+            # Прочесть не смогли — не утверждаем, что эскизов нет.
+            mark, key = MARK_CHECK, "unreadable"
+        else:
+            mark, key = MARK_NO_SKETCHES, "without_sketches"
+        stats[key] += 1
 
         new_name = set_order_mark(name, mark)
         if new_name != name:
@@ -3017,7 +3037,8 @@ class SketchExtractorApp:
             self.log(f"⚠ {w}")
         self.log(
             f"Помечено заказов: {MARK_HAS_SKETCHES} {stats['with_sketches']}, "
-            f"{MARK_NO_SKETCHES} {stats['without_sketches']}"
+            f"{MARK_NO_SKETCHES} {stats['without_sketches']}, "
+            f"{MARK_CHECK} {stats['unreadable']}"
         )
 
         lines = [
@@ -3026,6 +3047,11 @@ class SketchExtractorApp:
             f"{MARK_HAS_SKETCHES}  Эскизы есть: {stats['with_sketches']}",
             f"{MARK_NO_SKETCHES}  Эскизов нет: {stats['without_sketches']}",
         ]
+        if stats["unreadable"]:
+            lines.append(
+                f"{MARK_CHECK}  Не удалось прочесть .bln, посмотрите сами: "
+                f"{stats['unreadable']}"
+            )
         if stats["already_done"]:
             lines.append(f"{MARK_DONE}  Уже обработаны (не трогали): {stats['already_done']}")
         if stats["not_order_dirs"]:
