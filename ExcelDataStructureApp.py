@@ -1201,6 +1201,11 @@ def extract_sketch_code(text):
 # добавить сюда.
 EDGE_CODES = {"P002", "P006", "P008", "P013"}
 
+# Значение столбца "Кромка", когда кромим. Отдельной константой, потому что
+# то же значение ставится вручную в "Просмотре эскизов" (у .bln кодов нет
+# вовсе, и кромка отмечается только там).
+EDGE_YES = "Есть"
+
 
 def edge_for_sketch_code(code):
     """Кромка по коду с эскиза: "Есть" или прочерк."""
@@ -1211,7 +1216,7 @@ def edge_for_sketch_code(code):
     # раз, её всё равно видно на детали.
     parts = [c.strip().upper() for c in code.split("/")]
     if any(c.startswith("R") or c in EDGE_CODES for c in parts):
-        return "Есть"
+        return EDGE_YES
     return "-"
 
 
@@ -2113,7 +2118,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
     INFO_WIDTH = 330           # колонка с данными детали справа от чертежа
 
     def __init__(self, master, colors, icon_images, theme, rows, sketch_index,
-                 marked, on_apply):
+                 marked, edges, keybinds, on_apply):
         super().__init__(master)
         self.title("Просмотр эскизов")
         self.configure(fg_color=colors["bg"])
@@ -2126,6 +2131,11 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._index = sketch_index or {}
         self._on_apply = on_apply
         self._marked = set(marked or ())
+        # Кромка отмечается здесь же, по самому чертежу: глядя на эскиз,
+        # пользователь сразу видит, кромим мы эту деталь или нет. В .bln
+        # столбец "Кромка" иначе остаётся прочерком у всех строк.
+        self._edges = set(edges or ())
+        self._keybinds = dict(keybinds or DEFAULT_KEYBINDS)
         self._idx = 0
         self._img_cache = {}
         self._ctk_img = None  # держим ссылку, иначе картинку соберёт сборщик мусора
@@ -2162,12 +2172,13 @@ class SketchReviewDialog(ctk.CTkToplevel):
 
         # Данные детали — парами "подпись слева, значение справа", как в
         # шапке чертежа: глаз находит нужную строку, не перечитывая всё.
+        # Материала тут намеренно нет: он и так написан на самом чертеже,
+        # а колонка от этого становится короче и читается быстрее.
         self._fields = {}
         rows_spec = (
             ("order", "№ заказа"),
             ("part", "№ детали"),
             ("description", "Описание"),
-            ("material", "Материал"),
         )
         info = ctk.CTkFrame(side, fg_color=colors["card"], corner_radius=12)
         info.grid(row=0, column=0, sticky="ew")
@@ -2185,23 +2196,48 @@ class SketchReviewDialog(ctk.CTkToplevel):
             ).grid(row=i, column=1, sticky="ne", padx=(0, 14), pady=(12 if not i else 6, 0))
         ctk.CTkLabel(info, text="", height=6).grid(row=len(rows_spec), column=0)
 
-        self._state_var = tk.StringVar()
-        self._state_label = ctk.CTkLabel(
-            side, textvariable=self._state_var,
-            font=ctk.CTkFont(size=15, weight="bold"),
+        # Две отметки — обе видно и обе кликабельны, не только с клавиатуры.
+        marks = self._marks_frame = ctk.CTkFrame(
+            side, fg_color=colors["card"], corner_radius=12)
+        marks.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        marks.grid_columnconfigure(0, weight=1)
+
+        self._work_var = tk.BooleanVar(value=False)
+        self._work_check = ctk.CTkCheckBox(
+            marks, text="", variable=self._work_var, command=self._toggle,
+            fg_color=SUCCESS_COLOR, hover_color=SUCCESS_COLOR,
+            border_color=colors["border"], text_color=colors["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self._state_label.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        self._work_check.grid(row=0, column=0, sticky="w", padx=14, pady=(14, 6))
+
+        self._edge_var = tk.BooleanVar(value=False)
+        self._edge_check = ctk.CTkCheckBox(
+            marks, text="", variable=self._edge_var, command=self._toggle_edge,
+            fg_color=colors["accent"], hover_color=colors["accent_hover"],
+            border_color=colors["border"], text_color=colors["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self._edge_check.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 14))
+
+        # Красная плашка вместо галочек у деталей, которые не сделать
+        # физически (см. never_copy_reason) — показывается вместо них.
+        self._blocked_var = tk.StringVar()
+        self._blocked_label = ctk.CTkLabel(
+            side, textvariable=self._blocked_var, text_color=ERROR_COLOR,
+            font=ctk.CTkFont(size=15, weight="bold"), wraplength=self.INFO_WIDTH - 20,
+        )
 
         self._counter_var = tk.StringVar()
         ctk.CTkLabel(
             side, textvariable=self._counter_var, text_color=colors["muted"],
             justify="center",
-        ).grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ).grid(row=3, column=0, sticky="ew", pady=(12, 0))
 
-        side.grid_rowconfigure(3, weight=1)  # кнопки прижаты к низу колонки
+        side.grid_rowconfigure(4, weight=1)  # кнопки прижаты к низу колонки
 
         btn_col = ctk.CTkFrame(side, fg_color=colors["bg"])
-        btn_col.grid(row=4, column=0, sticky="ew")
+        btn_col.grid(row=5, column=0, sticky="ew")
         btn_col.grid_columnconfigure((0, 1), weight=1)
         nav = dict(height=34, corner_radius=20, fg_color=colors["card"],
                    hover_color=colors["input"], text_color=colors["text"],
@@ -2210,28 +2246,34 @@ class SketchReviewDialog(ctk.CTkToplevel):
             .grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ctk.CTkButton(btn_col, text="▶", command=lambda: self._step(1), **nav) \
             .grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ctk.CTkButton(btn_col, text="В работу (пробел)", command=self._toggle, **nav) \
-            .grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ctk.CTkButton(
             btn_col, text="Готово", command=self._apply, height=36, corner_radius=20,
             fg_color=colors["accent"], hover_color=colors["accent_hover"],
             text_color=colors["accent_text"],
-        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
+        self._hint_var = tk.StringVar()
         ctk.CTkLabel(
-            side, text="← →  листать      ПРОБЕЛ  в работу\nEnter  применить      Esc  отмена\n"
-                       "F11  во весь экран",
-            text_color=colors["muted"], justify="center",
-        ).grid(row=5, column=0, sticky="ew", pady=(12, 0))
+            side, textvariable=self._hint_var, text_color=colors["muted"],
+            justify="center",
+        ).grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        self._refresh_captions()
 
+        # Клавиши берём из настроек (см. KEYBIND_ACTIONS): пользователь
+        # мог переназначить их под свою руку.
+        actions = {
+            "work": lambda e: self._toggle(),
+            "edge": lambda e: self._toggle_edge(),
+            "prev": lambda e: self._step(-1),
+            "next": lambda e: self._step(1),
+            "apply": lambda e: self._apply(),
+            "cancel": lambda e: self._on_escape(),
+        }
+        for key, fn in actions.items():
+            self.bind(self._keybinds.get(key, DEFAULT_KEYBINDS[key]), fn)
         for seq, fn in (
-            ("<Left>", lambda e: self._step(-1)),
-            ("<Right>", lambda e: self._step(1)),
             ("<Prior>", lambda e: self._step(-1)),
             ("<Next>", lambda e: self._step(1)),
-            ("<space>", lambda e: self._toggle()),
-            ("<Return>", lambda e: self._apply()),
-            ("<Escape>", lambda e: self._on_escape()),
             ("<F11>", lambda e: self._toggle_fullscreen()),
             ("<Double-Button-1>", lambda e: self._toggle_fullscreen()),
         ):
@@ -2341,7 +2383,6 @@ class SketchReviewDialog(ctk.CTkToplevel):
             row.get("order") or row.get("order_from_content") or "—")
         self._fields["part"].set(part)
         self._fields["description"].set(row.get("description") or "—")
-        self._fields["material"].set(row.get("material") or "—")
 
         # ВАЖНО: старую картинку отпускаем ТОЛЬКО ПОСЛЕ configure(). Если
         # обнулить self._ctk_img раньше, сборщик мусора успевает удалить
@@ -2368,22 +2409,38 @@ class SketchReviewDialog(ctk.CTkToplevel):
         del previous
 
         blocked = row.get("never_copy")
-        marked = self._idx in self._marked
         if blocked:
-            # Сборка, стекло/зеркало, 3 мм — крестиком и красным, чтобы было
-            # видно сразу, не вчитываясь в материал.
-            self._state_var.set(f"✗ НЕ ДЕЛАЕМ — {blocked}")
-            self._state_label.configure(text_color=ERROR_COLOR)
-        elif marked:
-            self._state_var.set("✓ В РАБОТУ — копируется")
-            self._state_label.configure(text_color=SUCCESS_COLOR)
+            # Сборка, стекло/зеркало, тонкий материал — вместо галочек
+            # красная плашка с крестиком: отмечать тут нечего.
+            self._marks_frame.grid_remove()
+            self._blocked_var.set(f"✗ НЕ ДЕЛАЕМ — {blocked}")
+            self._blocked_label.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         else:
-            self._state_var.set("Не в работе — строка серая")
-            self._state_label.configure(text_color=colors["muted"])
+            self._blocked_label.grid_remove()
+            self._marks_frame.grid()
+            self._work_var.set(self._idx in self._marked)
+            self._edge_var.set(self._idx in self._edges)
+        self._refresh_captions()
+
         with_img = sum(1 for r in self._rows if self._sketch_for_row(r) is not None)
         self._counter_var.set(
-            f"{self._idx + 1} из {len(self._rows)}    •    отмечено: {len(self._marked)}\n"
-            f"с чертежом: {with_img}"
+            f"{self._idx + 1} из {len(self._rows)}    •    в работе: {len(self._marked)}\n"
+            f"кромка: {len(self._edges)}    •    с чертежом: {with_img}"
+        )
+
+    def _refresh_captions(self):
+        """Подписи галочек и подсказка внизу — с текущими клавишами."""
+        work_key = key_caption(self._keybinds.get("work", DEFAULT_KEYBINDS["work"]))
+        edge_key = key_caption(self._keybinds.get("edge", DEFAULT_KEYBINDS["edge"]))
+        prev_key = key_caption(self._keybinds.get("prev", DEFAULT_KEYBINDS["prev"]))
+        next_key = key_caption(self._keybinds.get("next", DEFAULT_KEYBINDS["next"]))
+        apply_key = key_caption(self._keybinds.get("apply", DEFAULT_KEYBINDS["apply"]))
+        cancel_key = key_caption(self._keybinds.get("cancel", DEFAULT_KEYBINDS["cancel"]))
+        self._work_check.configure(text=f"В работу   ({work_key})")
+        self._edge_check.configure(text=f"Кромка «Есть»   ({edge_key})")
+        self._hint_var.set(
+            f"{prev_key} {next_key}  листать      {apply_key}  применить\n"
+            f"{cancel_key}  отмена      F11  во весь экран"
         )
 
     # --- действия ----------------------------------------------------------
@@ -2400,7 +2457,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
     def _toggle(self):
         if self._rows[self._idx].get("never_copy"):
             # Отмечать нечего: станок такую деталь не сделает. Просто идём
-            # дальше, чтобы пробел не "залипал" на таких строках.
+            # дальше, чтобы клавиша не "залипала" на таких строках.
             self._step(1)
             return
         if self._idx in self._marked:
@@ -2412,8 +2469,21 @@ class SketchReviewDialog(ctk.CTkToplevel):
         # одной рукой, без лишнего нажатия стрелки. На последней стоим.
         self._step(1)
 
+    def _toggle_edge(self):
+        """Кромка — отдельная отметка и БЕЗ перехода к следующей детали:
+        её ставят к той же детали сразу после "в работу", глядя на тот же
+        чертёж. Перелистнули бы — отметка ушла бы не туда."""
+        if self._rows[self._idx].get("never_copy"):
+            self._edge_var.set(False)
+            return
+        if self._idx in self._edges:
+            self._edges.discard(self._idx)
+        else:
+            self._edges.add(self._idx)
+        self._show()
+
     def _apply(self):
-        self._on_apply(set(self._marked))
+        self._on_apply(set(self._marked), set(self._edges))
         self.destroy()
 
 
@@ -2888,24 +2958,37 @@ class SketchExtractorApp:
                 self.log("⚠ Чертежи, не подошедшие ни к одной строке: " + _short_list(keys_unused))
 
         marked = {i for i, inc in self.row_overrides.items() if inc}
+        # Уже проставленную кромку показываем отмеченной: в PDF inSight она
+        # берётся из кода эскиза (R00x/P00x), и снимать её заново незачем.
+        edges = {i for i, row in enumerate(self.current_rows)
+                 if row.get("edge") == EDGE_YES}
         SketchReviewDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            self.current_rows, index, marked, self._apply_review_marks,
+            self.current_rows, index, marked, edges, self.keybinds,
+            self._apply_review_marks,
         )
 
-    def _apply_review_marks(self, marked):
+    def _apply_review_marks(self, marked, edges):
         """Отмеченные в "Просмотре" копируются, все остальные становятся
-        серыми — пользователь прошёл заказ и решил, что берёт в работу."""
+        серыми — пользователь прошёл заказ и решил, что берёт в работу.
+        Заодно оттуда же приходит кромка: её видно на самом чертеже."""
         # never_copy сюда не попадает вовсе: такие строки не копируются при
         # любой отметке, и _apply_row_styling это учитывает отдельно.
         self.row_overrides = {
             i: (i in marked) for i, row in enumerate(self.current_rows)
             if not row.get("never_copy")
         }
+        edge_idx = self.columns.index("edge")
+        for i, (iid, row) in enumerate(zip(self.tree.get_children(), self.current_rows)):
+            row["edge"] = EDGE_YES if i in edges else "-"
+            values = list(self.tree.item(iid, "values"))
+            values[edge_idx] = row["edge"]
+            self.tree.item(iid, values=values)
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
         self.status_var.set(
-            f"Отмечено к копированию: {len(marked)} из {len(self.current_rows)}"
+            f"В работу: {len(marked)} из {len(self.current_rows)}    •    "
+            f"кромка: {len(edges)}"
         )
 
     def open_log_dialog(self):
