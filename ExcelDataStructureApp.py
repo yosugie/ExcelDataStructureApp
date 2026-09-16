@@ -413,9 +413,10 @@ def extract_material(stream):
 # Толщина — первое число в строке материала: "ЛДСП 16 Белый ..." -> 16
 MATERIAL_THICKNESS_RE = re.compile(r"^\S+\s+(\d+)")
 
-# Материалы такой толщины (мм) станок не пилит — такие строки по умолчанию
-# идут со снятой галочкой копирования, как и сборочные чертежи.
-NOT_MACHINABLE_THICKNESS_MM = {3}
+# Материалы такой толщины (мм) станок не пилит — слишком тонкие. Такие
+# строки не копируются вообще (см. never_copy_reason), как и сборочные
+# чертежи со стеклом. Список легко расширить.
+NOT_MACHINABLE_THICKNESS_MM = {3, 4}
 
 
 def material_thickness_mm(material):
@@ -484,7 +485,9 @@ def is_mirror_part_name(description):
 # и отмечены красным крестиком в "Просмотре" (см. never_copy_reason).
 NEVER_COPY_ASSEMBLY = "сборочный чертёж"
 NEVER_COPY_GLASS = "стекло/зеркало"
-NEVER_COPY_THIN = "толщина 3 мм"
+# С подстановкой: толщин несколько (3 мм, 4 мм фанера), и в причине
+# полезно видеть, какая именно у этой детали.
+NEVER_COPY_THIN = "толщина {} мм"
 
 
 def never_copy_reason(is_assembly=False, material=None, description=None,
@@ -492,15 +495,15 @@ def never_copy_reason(is_assembly=False, material=None, description=None,
     """Почему деталь не идёт на станок в принципе, или None.
 
     Сборочный чертёж — вообще не деталь; стекло и зеркало станок не
-    фрезерует; 3 мм он физически не пилит. Ни одно из трёх не зависит от
-    желания пользователя, поэтому такие строки в буфер не попадают даже
-    если отметить их руками."""
+    фрезерует; слишком тонкий материал (3 и 4 мм) он физически не пилит.
+    Ни одно из трёх не зависит от желания пользователя, поэтому такие
+    строки в буфер не попадают даже если отметить их руками."""
     if is_assembly:
         return NEVER_COPY_ASSEMBLY
     if is_glass_material(material) or is_mirror_part_name(description):
         return NEVER_COPY_GLASS
     if thickness_mm in NOT_MACHINABLE_THICKNESS_MM:
-        return NEVER_COPY_THIN
+        return NEVER_COPY_THIN.format(thickness_mm)
     return None
 
 
