@@ -895,30 +895,44 @@ def set_order_dir_mark(order_dir, mark):
 def find_sketch_pdfs_for_order(order_dir):
     """PDF с эскизами внутри папки заказа — искать их руками не нужно.
 
-    Два места, оба реальные у пользователя:
-      - подпапка эскизов: выгружая эскизы из .bln, он получает папку с тем же
-        именем, что и папка внутри библиотеки ("эск", "Эскизы", "эскизы"...),
-        а в ней — по одному PDF на эскиз;
-      - отдельные PDF прямо в папке заказа, если в имени есть "эск".
-    Глубже подпапки эскизов проходим целиком (os.walk): как именно Базис
-    разложит файлы внутри, зависит от структуры библиотеки.
+    PDF считается эскизом, если выполнено ЛЮБОЕ из двух:
+
+      1) он лежит в ПАПКЕ ЭСКИЗОВ — в папке, у которой в имени есть "эск"
+         ("эск", "Эскизы", "эскизы"...), на любой глубине внутри папки
+         заказа. Внутри такой папки берём ВСЕ PDF подряд, не глядя на их
+         имена: папка для того и заведена, что бы там ни лежало. Сюда же
+         пользователь кладёт доп. эскизы руками;
+      2) у самого файла в имени есть "эск" — так Базис называет эскизы,
+         когда выгружает их прямо в папку заказа ("01 037 (Гор. щит) эскиз
+         2.pdf"), без всякой подпапки.
+
+    ВАЖНО: брать вообще ВСЕ PDF из папки заказа НЕЛЬЗЯ. Рядом лежат смета,
+    шаблон, спецификация — а в смете встречаются коды деталей, и к строке
+    молча подставился бы чужой чертёж (см. "лучше без картинки, чем чужая"
+    в index_sketch_pdfs).
     """
     found = []
+    seen = set()
     try:
-        names = sorted(os.listdir(order_dir))
+        walker = os.walk(order_dir)
     except OSError:
         return []
-    for name in names:
-        full = os.path.join(order_dir, name)
-        if os.path.isdir(full):
-            if looks_like_sketch_folder(name):
-                for sub_root, _dirs, files in os.walk(full):
-                    found.extend(
-                        os.path.join(sub_root, f)
-                        for f in sorted(files) if f.lower().endswith(".pdf")
-                    )
-        elif name.lower().endswith(".pdf") and looks_like_sketch_folder(name):
-            found.append(full)
+    for dir_path, dir_names, file_names in walker:
+        dir_names.sort()
+        # Папка эскизов — сама или любая из родительских внутри заказа.
+        inside_sketch_dir = any(
+            looks_like_sketch_folder(part)
+            for part in os.path.relpath(dir_path, order_dir).split(os.sep)
+        )
+        for file_name in sorted(file_names):
+            if not file_name.lower().endswith(".pdf"):
+                continue
+            if not (inside_sketch_dir or looks_like_sketch_folder(file_name)):
+                continue
+            path = os.path.join(dir_path, file_name)
+            if path not in seen:
+                seen.add(path)
+                found.append(path)
     return found
 
 
