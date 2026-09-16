@@ -251,6 +251,27 @@ def _apply_window_icon(window, icon_images, theme):
             pass
 
 
+def maximize_window(window):
+    """Развернуть окно на весь экран.
+
+    Сначала пробуем по-настоящему, как это делает система: на Windows
+    работает state("zoomed") — окно становится развёрнутым, а "восстановить"
+    возвращает прежний размер. На Linux этого состояния у Tk нет (ошибка
+    "bad argument"), там есть атрибут -zoomed, но он зависит от оконного
+    менеджера и без него молча ничего не делает — поэтому следом всё равно
+    задаём размер в экран руками."""
+    try:
+        window.state("zoomed")
+        return
+    except tk.TclError:
+        pass
+    try:
+        window.attributes("-zoomed", True)
+    except tk.TclError:
+        pass
+    window.geometry(f"{window.winfo_screenwidth()}x{window.winfo_screenheight()}+0+0")
+
+
 def fix_clipboard_shortcuts(widget):
     """Чинит Ctrl+C/V/X и Ctrl+A в полях ввода/тексте независимо от раскладки клавиатуры."""
 
@@ -2145,7 +2166,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
         # Окно сразу на весь экран: чертёж мелкий, чем больше места, тем
         # меньше вглядываться. Разворачиваем ДО первой отрисовки, чтобы
         # картинка сразу считалась под реальный размер, а не под минимальный.
-        self._go_maximized()
+        maximize_window(self)
 
         # Никаких карточек и рамок: всё место отдано чертежу, данные детали —
         # узкой колонкой справа.
@@ -2289,23 +2310,6 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self.focus_force()
 
     # --- окно --------------------------------------------------------------
-
-    def _go_maximized(self):
-        """Развернуть окно на весь экран.
-
-        Сначала просто задаём размер в экран: этого достаточно и там, где
-        оконный менеджер запрос "развернуть" молча игнорирует. И только
-        потом просим систему развернуть окно по-настоящему — на Windows это
-        state("zoomed"), на Linux атрибут -zoomed; который из них сработает,
-        заранее не известно, поэтому пробуем оба."""
-        self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
-        for maximize in (lambda: self.state("zoomed"),
-                         lambda: self.attributes("-zoomed", True)):
-            try:
-                maximize()
-                return
-            except tk.TclError:
-                continue
 
     def _toggle_fullscreen(self):
         """Полный экран (без рамки и панели задач) по F11 или двойному клику."""
@@ -2491,6 +2495,8 @@ class SketchExtractorApp:
     def __init__(self, root):
         self.root = root
         root.title("Парсер учёта эскизов")
+        # Размер "восстановленного" окна — на случай, если пользователь
+        # свернёт его из развёрнутого состояния (см. maximize_window ниже).
         root.geometry("1300x1020")
 
         self.theme = "dark"
@@ -2557,6 +2563,9 @@ class SketchExtractorApp:
         self._loading_after_id = None  # id тика анимации спиннера (см. _set_loading_state)
 
         self.apply_theme()
+        self.on_source_mode_change()
+        # Разворачиваем в самом конце, когда виджеты уже разложены.
+        maximize_window(root)
 
     def _build_top_bar(self, root, t):
         """Шапка: заголовок приложения + переключатель темы."""
