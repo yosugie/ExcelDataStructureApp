@@ -2686,16 +2686,15 @@ class SketchExtractorApp:
         self._reg(stage_label, "label")
 
         self.mark_btn = ctk.CTkButton(
-            stage_row,
-            text=f"1 · Отсортировать заказы  {MARK_HAS_SKETCHES}{MARK_NO_SKETCHES}",
-            command=self.mark_day_folder, height=36, width=260, corner_radius=20,
+            stage_row, text="Отсортировать заказы",
+            command=self.mark_day_folder, height=36, width=210, corner_radius=20,
         )
         self.mark_btn.pack(side="left")
         self._reg(self.mark_btn, "secondary_button")
 
         self.parse_btn = ctk.CTkButton(
-            stage_row, text="2 · Разобрать и отметить", command=self.run_parse,
-            height=36, width=230, corner_radius=20,
+            stage_row, text="Разобрать и отметить", command=self.run_parse,
+            height=36, width=210, corner_radius=20,
         )
         self.parse_btn.pack(side="left", padx=(8, 0))
         self._reg(self.parse_btn, "accent_button")
@@ -3458,17 +3457,19 @@ class SketchExtractorApp:
             f"{MARK_CHECK} {stats['unreadable']}"
         )
 
+        # Всего папок — сумма всех помеченных плюс уже обработанные: это то
+        # число, с которым пользователь сверяется глазами в проводнике.
+        total = (stats["with_sketches"] + stats["without_sketches"]
+                 + stats["unreadable"] + stats["already_done"])
         lines = [
             f"Папка: {os.path.basename(os.path.normpath(path))}",
             "",
+            f"Всего папок заказов: {total}",
+            "",
             f"{MARK_HAS_SKETCHES}  Эскизы есть: {stats['with_sketches']}",
             f"{MARK_NO_SKETCHES}  Эскизов нет: {stats['without_sketches']}",
+            f"{MARK_CHECK}  Не удалось прочесть .bln: {stats['unreadable']}",
         ]
-        if stats["unreadable"]:
-            lines.append(
-                f"{MARK_CHECK}  Не удалось прочесть .bln, посмотрите сами: "
-                f"{stats['unreadable']}"
-            )
         if stats["already_done"]:
             lines.append(f"{MARK_DONE}  Уже обработаны (не трогали): {stats['already_done']}")
         if stats["not_order_dirs"]:
