@@ -1847,7 +1847,7 @@ class LogDialog(ctk.CTkToplevel):
 
 
 class SketchReviewDialog(ctk.CTkToplevel):
-    """Просмотр эскизов заказа с отметкой "делаю сегодня".
+    """Просмотр эскизов заказа с отметкой "в работу".
 
     Листаем строки стрелками, пробелом отмечаем те детали, которые идут в
     работу. Отмеченные копируются (с пустой "Дата готовности" — её
@@ -1957,7 +1957,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
             .grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ctk.CTkButton(btn_col, text="▶", command=lambda: self._step(1), **nav) \
             .grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ctk.CTkButton(btn_col, text="Отметить «делаю» (пробел)", command=self._toggle, **nav) \
+        ctk.CTkButton(btn_col, text="В работу (пробел)", command=self._toggle, **nav) \
             .grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ctk.CTkButton(
             btn_col, text="Готово", command=self._apply, height=36, corner_radius=20,
@@ -1966,7 +1966,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
         ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         ctk.CTkLabel(
-            side, text="← →  листать      ПРОБЕЛ  отметить\nEnter  применить      Esc  отмена\n"
+            side, text="← →  листать      ПРОБЕЛ  в работу\nEnter  применить      Esc  отмена\n"
                        "F11  во весь экран",
             text_color=colors["muted"], justify="center",
         ).grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -2098,7 +2098,7 @@ class SketchReviewDialog(ctk.CTkToplevel):
         del previous
 
         marked = self._idx in self._marked
-        self._state_var.set("✓ ДЕЛАЮ — копируется" if marked else "не отмечено — серая строка")
+        self._state_var.set("✓ В РАБОТУ — копируется" if marked else "Не в работе — строка серая")
         self._state_label.configure(text_color=SUCCESS_COLOR if marked else colors["muted"])
         with_img = sum(1 for r in self._rows if self._sketch_for_row(r) is not None)
         self._counter_var.set(
@@ -2511,7 +2511,7 @@ class SketchExtractorApp:
         self.clear_btn.pack(side="left", padx=(8, 0))
         self._reg(self.clear_btn, "secondary_button", surface="bg")
 
-        # Просмотр эскизов с отметкой "делаю" (см. SketchReviewDialog).
+        # Просмотр эскизов с отметкой "в работу" (см. SketchReviewDialog).
         self.review_btn = ctk.CTkButton(
             btn_frame, text="Просмотр эскизов", command=self.open_review_dialog,
             height=32, width=180, corner_radius=20,
@@ -2538,7 +2538,7 @@ class SketchExtractorApp:
         return widget
 
     def open_review_dialog(self):
-        """Просмотр эскизов заказа с отметкой "делаю сегодня" (см.
+        """Просмотр эскизов заказа с отметкой "в работу" (см.
         SketchReviewDialog). Чертёж к строке находится по КОДУ ДЕТАЛИ среди
         выбранных PDF — точно, без догадок по порядку страниц."""
         if not self.current_rows:
@@ -2594,7 +2594,7 @@ class SketchExtractorApp:
 
     def _apply_review_marks(self, marked):
         """Отмеченные в "Просмотре" копируются, все остальные становятся
-        серыми — пользователь прошёл заказ и решил, что делает сегодня."""
+        серыми — пользователь прошёл заказ и решил, что берёт в работу."""
         self.row_overrides = {i: (i in marked) for i in range(len(self.current_rows))}
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
