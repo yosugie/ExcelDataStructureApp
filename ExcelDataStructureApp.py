@@ -576,7 +576,7 @@ def is_mirror_part_name(description):
 # Причины, по которым деталь НЕ МОЖЕТ пойти на станок физически — в отличие
 # от NOT_MACHINABLE_PART_NAMES (там это решение "на этом станке не делаем",
 # и пользователь вправе его переменить). Такие строки не копируются вообще
-# и отмечены красным крестиком в "Просмотре" (см. never_copy_reason).
+# и вообще не показываются в "Просмотре эскизов" (см. never_copy_reason).
 NEVER_COPY_ASSEMBLY = "сборочный чертёж"
 NEVER_COPY_GLASS = "стекло/зеркало"
 # С подстановкой: толщин несколько (3 мм, 4 мм фанера), и в причине
@@ -2255,14 +2255,6 @@ class SketchReviewDialog(ctk.CTkToplevel):
         )
         self._edge_check.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 14))
 
-        # Красная плашка вместо галочек у деталей, которые не сделать
-        # физически (см. never_copy_reason) — показывается вместо них.
-        self._blocked_var = tk.StringVar()
-        self._blocked_label = ctk.CTkLabel(
-            side, textvariable=self._blocked_var, text_color=ERROR_COLOR,
-            font=ctk.CTkFont(size=15, weight="bold"), wraplength=self.INFO_WIDTH - 20,
-        )
-
         self._counter_var = tk.StringVar()
         ctk.CTkLabel(
             side, textvariable=self._counter_var, text_color=colors["muted"],
@@ -2426,18 +2418,8 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._ctk_img = new_img
         del previous
 
-        blocked = row.get("never_copy")
-        if blocked:
-            # Сборка, стекло/зеркало, тонкий материал — вместо галочек
-            # красная плашка с крестиком: отмечать тут нечего.
-            self._marks_frame.grid_remove()
-            self._blocked_var.set(f"✗ НЕ ДЕЛАЕМ — {blocked}")
-            self._blocked_label.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        else:
-            self._blocked_label.grid_remove()
-            self._marks_frame.grid()
-            self._work_var.set(self._idx in self._marked)
-            self._edge_var.set(self._idx in self._edges)
+        self._work_var.set(self._idx in self._marked)
+        self._edge_var.set(self._idx in self._edges)
         self._refresh_captions()
 
         with_img = sum(1 for r in self._rows if self._sketch_for_row(r) is not None)
@@ -2473,11 +2455,6 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._show()
 
     def _toggle(self):
-        if self._rows[self._idx].get("never_copy"):
-            # Отмечать нечего: станок такую деталь не сделает. Просто идём
-            # дальше, чтобы клавиша не "залипала" на таких строках.
-            self._step(1)
-            return
         if self._idx in self._marked:
             self._marked.discard(self._idx)
         else:
@@ -2491,9 +2468,6 @@ class SketchReviewDialog(ctk.CTkToplevel):
         """Кромка — отдельная отметка и БЕЗ перехода к следующей детали:
         её ставят к той же детали сразу после "в работу", глядя на тот же
         чертёж. Перелистнули бы — отметка ушла бы не туда."""
-        if self._rows[self._idx].get("never_copy"):
-            self._edge_var.set(False)
-            return
         if self._idx in self._edges:
             self._edges.discard(self._idx)
         else:
@@ -2562,6 +2536,10 @@ class SketchExtractorApp:
         # Отметки из окна "Просмотр" — {номер строки: копировать_ли}.
         # Как и group_overrides, сбрасываются при новом разборе и "Очистить".
         self.row_overrides = {}
+        # Номера строк таблицы, показанных в последнем "Просмотре": окно
+        # живёт позициями в своём списке, а строки без never_copy туда не
+        # попадают вовсе (см. open_review_dialog).
+        self._review_rows = []
         self._copy_selection_dialog = None
         # Столбцы для копирования — {имя_столбца: копировать_ли}, по умолчанию
         # все включены; отмечаются галочками прямо в шапке таблицы (см.
@@ -2981,38 +2959,65 @@ class SketchExtractorApp:
             if keys_unused:
                 self.log("⚠ Чертежи, не подошедшие ни к одной строке: " + _short_list(keys_unused))
 
-        marked = {i for i, inc in self.row_overrides.items() if inc}
+        # Детали, которые не сделать физически (сборка, стекло/зеркало,
+        # тонкий материал), в просмотр не попадают вовсе: решать по ним
+        # нечего, а листать лишние чертежи — только время терять. В таблице
+        # они, конечно, остаются — это отчётность.
+        self._review_rows = [i for i, row in enumerate(self.current_rows)
+                             if not row.get("never_copy")]
+        hidden = len(self.current_rows) - len(self._review_rows)
+        if hidden:
+            self.log(f"В просмотр не попали (не идут в работу): {hidden}")
+        if not self._review_rows:
+            self.show_message(
+                "Нечего смотреть",
+                "Все детали этого заказа не идут в работу "
+                "(сборка, стекло/зеркало, тонкий материал).",
+            )
+            return
+
+        # Дальше окно живёт своими номерами строк — позициями в этом
+        # списке; обратно в номера строк таблицы их переводит
+        # _apply_review_marks по self._review_rows.
+        rows = [self.current_rows[i] for i in self._review_rows]
+        marked = {pos for pos, i in enumerate(self._review_rows)
+                  if self.row_overrides.get(i)}
         # Уже проставленную кромку показываем отмеченной: в PDF inSight она
         # берётся из кода эскиза (R00x/P00x), и снимать её заново незачем.
-        edges = {i for i, row in enumerate(self.current_rows)
-                 if row.get("edge") == EDGE_YES}
+        edges = {pos for pos, i in enumerate(self._review_rows)
+                 if self.current_rows[i].get("edge") == EDGE_YES}
         SketchReviewDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            self.current_rows, index, marked, edges, self.keybinds,
+            rows, index, marked, edges, self.keybinds,
             self._apply_review_marks,
         )
 
     def _apply_review_marks(self, marked, edges):
         """Отмеченные в "Просмотре" копируются, все остальные становятся
         серыми — пользователь прошёл заказ и решил, что берёт в работу.
-        Заодно оттуда же приходит кромка: её видно на самом чертеже."""
+        Заодно оттуда же приходит кромка: её видно на самом чертеже.
+
+        marked/edges — позиции в списке показанных строк (см.
+        open_review_dialog), переводим их в номера строк таблицы."""
+        shown = self._review_rows
+        marked_rows = {shown[pos] for pos in marked if pos < len(shown)}
+        edge_rows = {shown[pos] for pos in edges if pos < len(shown)}
         # never_copy сюда не попадает вовсе: такие строки не копируются при
         # любой отметке, и _apply_row_styling это учитывает отдельно.
-        self.row_overrides = {
-            i: (i in marked) for i, row in enumerate(self.current_rows)
-            if not row.get("never_copy")
-        }
+        self.row_overrides = {i: (i in marked_rows) for i in shown}
         edge_idx = self.columns.index("edge")
         for i, (iid, row) in enumerate(zip(self.tree.get_children(), self.current_rows)):
-            row["edge"] = EDGE_YES if i in edges else "-"
+            if i not in self.row_overrides:
+                continue  # строку не показывали — её кромку не трогаем
+            row["edge"] = EDGE_YES if i in edge_rows else "-"
             values = list(self.tree.item(iid, "values"))
             values[edge_idx] = row["edge"]
             self.tree.item(iid, values=values)
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
         self.status_var.set(
-            f"В работу: {len(marked)} из {len(self.current_rows)}    •    "
-            f"кромка: {len(edges)}"
+            f"В работу: {len(marked_rows)} из {len(shown)}    •    "
+            f"кромка: {len(edge_rows)}"
         )
 
     def open_log_dialog(self):
