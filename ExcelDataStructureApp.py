@@ -448,16 +448,54 @@ def is_excluded_part_name(description):
     return bool(description) and description.strip().lower() in NOT_MACHINABLE_PART_NAMES
 
 
-# Стекло станок не фрезерует вообще — в отличие от NOT_MACHINABLE_THICKNESS_MM
-# (там конкретная толщина у обычных плитных материалов), тут исключение по
-# самому типу материала, независимо от толщины и названия детали (у стекольных
-# деталей встречаются разные названия: "Полка стекло", "Стекло в фасад",
-# "Стекло в фасад прав." и т.п. — перечислять их все ненадёжно).
-GLASS_MATERIAL_RE = re.compile(r"^Стекло\b", re.IGNORECASE)
+# Стекло и зеркало станок не фрезерует вообще — в отличие от
+# NOT_MACHINABLE_THICKNESS_MM (там конкретная толщина у обычных плитных
+# материалов), тут исключение по самому типу материала, независимо от толщины
+# и названия детали (у стекольных деталей встречаются разные названия: "Полка
+# стекло", "Стекло в фасад", "Стекло в фасад прав." и т.п. — перечислять их
+# все ненадёжно).
+GLASS_MATERIAL_RE = re.compile(r"^(?:Стекло|Зеркало)\b", re.IGNORECASE)
+
+# Зеркало опознаётся и по названию детали ("Зеркало на фасад", "Зеркало в
+# фасад"): материал у него бывает виртуальным ("Зеркало 4 б_цв на щит
+# (Артикул virtual)"), но и по названию видно сразу. ВАЖНО: проверяем только
+# НАЧАЛО названия, а не вхождение где угодно — иначе под правило попала бы
+# "Полка под зеркало", а это обычный щит, и его как раз делаем.
+MIRROR_NAME_RE = re.compile(r"^\s*Зеркал", re.IGNORECASE)
 
 
 def is_glass_material(material):
     return bool(material) and bool(GLASS_MATERIAL_RE.match(material))
+
+
+def is_mirror_part_name(description):
+    return bool(description) and bool(MIRROR_NAME_RE.match(description))
+
+
+# Причины, по которым деталь НЕ МОЖЕТ пойти на станок физически — в отличие
+# от NOT_MACHINABLE_PART_NAMES (там это решение "на этом станке не делаем",
+# и пользователь вправе его переменить). Такие строки не копируются вообще
+# и отмечены красным крестиком в "Просмотре" (см. never_copy_reason).
+NEVER_COPY_ASSEMBLY = "сборочный чертёж"
+NEVER_COPY_GLASS = "стекло/зеркало"
+NEVER_COPY_THIN = "толщина 3 мм"
+
+
+def never_copy_reason(is_assembly=False, material=None, description=None,
+                      thickness_mm=None):
+    """Почему деталь не идёт на станок в принципе, или None.
+
+    Сборочный чертёж — вообще не деталь; стекло и зеркало станок не
+    фрезерует; 3 мм он физически не пилит. Ни одно из трёх не зависит от
+    желания пользователя, поэтому такие строки в буфер не попадают даже
+    если отметить их руками."""
+    if is_assembly:
+        return NEVER_COPY_ASSEMBLY
+    if is_glass_material(material) or is_mirror_part_name(description):
+        return NEVER_COPY_GLASS
+    if thickness_mm in NOT_MACHINABLE_THICKNESS_MM:
+        return NEVER_COPY_THIN
+    return None
 
 
 def looks_like_sketch_folder(name):
@@ -590,6 +628,8 @@ def parse_bln_sketches(bln_path):
             description = desc_m.group(1).strip()
 
         is_excluded_name = is_excluded_part_name(description)
+        # Название тут известно уже после DESC_RE — зеркало ловится и по нему.
+        blocked = never_copy_reason(is_assembly, material, description, thickness_mm)
 
         if is_assembly:
             n_assembly += 1
@@ -627,6 +667,7 @@ def parse_bln_sketches(bln_path):
                 "description": description,
                 "material": material,
                 "auto_exclude": is_assembly or is_too_thin or is_excluded_name or is_glass,
+                "never_copy": blocked,
             })
 
     if n_not_machinable:
@@ -1315,6 +1356,10 @@ def parse_pdf_sketches(pdf_path):
                 "standard_blank_code": code,
                 "edge": edge,
                 "auto_exclude": is_too_thin or is_excluded_name or is_bad_diagonal or is_glass,
+                # Сборочных чертежей в выгрузке inSight не бывает — тут
+                # блокируют только стекло/зеркало и 3 мм.
+                "never_copy": never_copy_reason(
+                    material=material, description=part_name, thickness_mm=thickness_mm),
             })
 
     if order_votes:
@@ -1584,7 +1629,8 @@ class CopySelectionDialog(ctk.CTkToplevel):
     что программа сняла сама — временно копируем всё), "Готово" просто
     закрывает окно — все изменения уже применяются сразу по клику."""
 
-    def __init__(self, master, colors, icon_images, theme, counts, checked_state, on_toggle, on_reset, on_select_all):
+    def __init__(self, master, colors, icon_images, theme, counts, checked_state,
+                 locked, on_toggle, on_reset, on_select_all):
         super().__init__(master)
         self.title("Что копировать")
         self.resizable(False, False)
@@ -1615,7 +1661,7 @@ class CopySelectionDialog(ctk.CTkToplevel):
             scrollbar_button_hover_color=colors["muted"],
         )
         self._scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
-        self._build_checklist(counts, checked_state)
+        self._build_checklist(counts, checked_state, locked)
 
         btn_row = ctk.CTkFrame(self._content, fg_color=colors["card"])
         btn_row.grid(row=2, column=0, pady=(0, 20))
@@ -1642,12 +1688,14 @@ class CopySelectionDialog(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
         self.grab_set()
 
-    def _build_checklist(self, counts, checked_state):
+    def _build_checklist(self, counts, checked_state, locked):
         colors = self._colors
-        # Отмеченные (то, что копируем) — наверх списка, снятые — вниз.
+        # Порядок: отмеченные (то, что копируем) наверх, снятые ниже, а те,
+        # что не сделать физически, — в самый низ: выбирать там нечего.
         items = sorted(
             counts.items(),
             key=lambda pair: (
+                pair[0] in locked,
                 not checked_state.get(pair[0], True),
                 (pair[0][0] or "").lower(),
                 (pair[0][1] or "").lower(),
@@ -1659,20 +1707,25 @@ class CopySelectionDialog(ctk.CTkToplevel):
             # разного материала это разные виды, и различить их можно
             # только по нему (см. SketchExtractorApp._row_group_key).
             label = f"{description or '(без названия)'} ({count})"
+            reason = locked.get(group_key)
+            if reason:
+                label += f"  —  не делаем: {reason}"
             if material:
                 label += f"\n{material}"
             var = tk.BooleanVar(value=checked_state.get(group_key, True))
             ctk.CTkCheckBox(
                 self._scroll, text=label, variable=var,
-                text_color=colors["text"], fg_color=colors["accent"],
-                hover_color=colors["accent_hover"], border_color=colors["border"],
+                text_color=colors["muted"] if reason else colors["text"],
+                fg_color=colors["accent"], hover_color=colors["accent_hover"],
+                border_color=colors["border"],
+                state="disabled" if reason else "normal",
                 command=lambda k=group_key, v=var: self._on_toggle(k, v.get()),
             ).pack(anchor="w", pady=4, padx=4)
 
-    def refresh(self, counts, checked_state):
+    def refresh(self, counts, checked_state, locked):
         for child in self._scroll.winfo_children():
             child.destroy()
-        self._build_checklist(counts, checked_state)
+        self._build_checklist(counts, checked_state, locked)
 
 
 class OrderSelectionDialog(ctk.CTkToplevel):
@@ -2097,9 +2150,19 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._ctk_img = new_img
         del previous
 
+        blocked = row.get("never_copy")
         marked = self._idx in self._marked
-        self._state_var.set("✓ В РАБОТУ — копируется" if marked else "Не в работе — строка серая")
-        self._state_label.configure(text_color=SUCCESS_COLOR if marked else colors["muted"])
+        if blocked:
+            # Сборка, стекло/зеркало, 3 мм — крестиком и красным, чтобы было
+            # видно сразу, не вчитываясь в материал.
+            self._state_var.set(f"✗ НЕ ДЕЛАЕМ — {blocked}")
+            self._state_label.configure(text_color=ERROR_COLOR)
+        elif marked:
+            self._state_var.set("✓ В РАБОТУ — копируется")
+            self._state_label.configure(text_color=SUCCESS_COLOR)
+        else:
+            self._state_var.set("Не в работе — строка серая")
+            self._state_label.configure(text_color=colors["muted"])
         with_img = sum(1 for r in self._rows if self._sketch_for_row(r) is not None)
         self._counter_var.set(
             f"{self._idx + 1} из {len(self._rows)}    •    отмечено: {len(self._marked)}\n"
@@ -2118,6 +2181,11 @@ class SketchReviewDialog(ctk.CTkToplevel):
         self._show()
 
     def _toggle(self):
+        if self._rows[self._idx].get("never_copy"):
+            # Отмечать нечего: станок такую деталь не сделает. Просто идём
+            # дальше, чтобы пробел не "залипал" на таких строках.
+            self._step(1)
+            return
         if self._idx in self._marked:
             self._marked.discard(self._idx)
         else:
@@ -2595,7 +2663,12 @@ class SketchExtractorApp:
     def _apply_review_marks(self, marked):
         """Отмеченные в "Просмотре" копируются, все остальные становятся
         серыми — пользователь прошёл заказ и решил, что берёт в работу."""
-        self.row_overrides = {i: (i in marked) for i in range(len(self.current_rows))}
+        # never_copy сюда не попадает вовсе: такие строки не копируются при
+        # любой отметке, и _apply_row_styling это учитывает отдельно.
+        self.row_overrides = {
+            i: (i in marked) for i, row in enumerate(self.current_rows)
+            if not row.get("never_copy")
+        }
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
         self.status_var.set(
@@ -2728,11 +2801,16 @@ class SketchExtractorApp:
     def _copy_selection_counts_and_state(self):
         counts = {}
         all_auto_included = {}
+        # Виды, которые не сделать физически (сборка, стекло/зеркало, 3 мм):
+        # галочка у них заблокирована — переключать нечего.
+        self._locked_groups = {}
         for row in self.current_rows:
             key = self._row_group_key(row)
             counts[key] = counts.get(key, 0) + 1
             included = not row["auto_exclude"]
             all_auto_included[key] = all_auto_included.get(key, True) and included
+            if row.get("never_copy"):
+                self._locked_groups[key] = row["never_copy"]
         # Галочка снята по умолчанию, если хоть одну строку этого вида
         # программа сама исключила (или так выбрано вручную ранее) — но пока
         # пользователь не кликнет по галочке сам, это только для наглядности
@@ -2740,18 +2818,20 @@ class SketchExtractorApp:
         # _apply_row_styling — там в силе остаётся "auto_exclude" каждой
         # строки, если явного выбора для этого вида ещё не было).
         checked_state = {
-            key: self.group_overrides.get(key, all_auto_included[key]) for key in counts
+            key: False if key in self._locked_groups
+            else self.group_overrides.get(key, all_auto_included[key])
+            for key in counts
         }
-        return counts, checked_state
+        return counts, checked_state, dict(self._locked_groups)
 
     def open_copy_selection_dialog(self):
         if not self.current_rows:
             self.show_message("Нечего показывать", "Сначала разберите файл.")
             return
-        counts, checked_state = self._copy_selection_counts_and_state()
+        counts, checked_state, locked = self._copy_selection_counts_and_state()
         self._copy_selection_dialog = CopySelectionDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            counts, checked_state, self.toggle_group_copying,
+            counts, checked_state, locked, self.toggle_group_copying,
             self.reset_copy_selection_to_auto, self.select_all_for_copying,
         )
 
@@ -2773,18 +2853,26 @@ class SketchExtractorApp:
 
     def select_all_for_copying(self):
         # Отмечает вообще все виды — временно копируется всё, включая то,
-        # что программа сама считает не идущим на станок.
-        self.group_overrides = {self._row_group_key(row): True for row in self.current_rows}
+        # что программа сама считает не идущим на станок. Кроме того, что не
+        # сделать физически (never_copy): его "все" не касается.
+        self.group_overrides = {
+            self._row_group_key(row): True for row in self.current_rows
+            if not row.get("never_copy")
+        }
         self._apply_row_styling()
         self._refresh_copy_selection_dialog()
 
     def _apply_row_styling(self):
-        # Приоритет: отметка из "Просмотра" по КОНКРЕТНОЙ строке → выбор по
-        # виду детали из "Что копировать" → автоматика разбора. Просмотр
-        # главнее вида: две одинаково названные детали (два "Гор. щит") в
-        # одном заказе бывают — одну делаем сегодня, вторую нет.
+        # Приоритет: физическая невозможность (never_copy — сборка, стекло/
+        # зеркало, 3 мм) → отметка из "Просмотра" по КОНКРЕТНОЙ строке →
+        # выбор по виду детали из "Что копировать" → автоматика разбора.
+        # Просмотр главнее вида: две одинаково названные детали (два "Гор.
+        # щит") в одном заказе бывают — одну делаем, вторую нет. А never_copy
+        # главнее всего: станок такую деталь не сделает при любом желании.
         for i, (iid, row) in enumerate(zip(self.tree.get_children(), self.current_rows)):
-            if i in self.row_overrides:
+            if row.get("never_copy"):
+                included = False
+            elif i in self.row_overrides:
                 included = self.row_overrides[i]
             else:
                 included = self.group_overrides.get(
@@ -3301,7 +3389,11 @@ class SketchExtractorApp:
             order_for_row = item["order_from_content"] or order_number or missing_marker
             part_for_row = item["part_code"] or missing_marker
             blank_code = item.get("standard_blank_code")
-            auto_exclude = bool(item.get("auto_exclude"))
+            # "never_copy" — причина, по которой деталь не сделать физически
+            # (сборка, стекло/зеркало, 3 мм). Такая строка серая всегда и в
+            # буфер не попадает даже при ручной отметке (_apply_row_styling).
+            blocked = item.get("never_copy")
+            auto_exclude = bool(item.get("auto_exclude")) or bool(blocked)
             row = {
                 "date": current_date,
                 "order": order_for_row,
@@ -3335,6 +3427,7 @@ class SketchExtractorApp:
                 # состояние исключения, пока пользователь сам не сгруппирует
                 # их вручную через "Что копировать" (см. group_overrides).
                 "auto_exclude": auto_exclude,
+                "never_copy": blocked,
                 "include": not auto_exclude,
             }
             self.tree.insert("", tk.END, values=(
