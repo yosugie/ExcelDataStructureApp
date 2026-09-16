@@ -41,6 +41,7 @@
 import os
 import re
 import sys
+import json
 import queue
 import struct
 import ctypes
@@ -91,11 +92,83 @@ SOURCE_TYPES = ("Базис", "inSight", "inSight (Базис)")
 # Основной станок пользователя — большинство деталей идёт на него.
 MACHINE_NAME = "Rover C9"
 
-# Что разбираем: папку дня со всеми заказами (обычный режим) или один файл
-# заказа. Переключатель в карточке "Основное" — от него зависит, что
-# откроет кнопка "Выбрать..." (см. browse_path).
-MODE_DAY = "Папка дня"
-MODE_SINGLE = "Один заказ"
+# Откуда заказ — переключатель в карточке "Основное". От него зависит, что
+# вообще можно выбрать: у Базиса это папка дня ИЛИ один файл .bln, у inSight
+# только PDF-выгрузка (см. _build_main_card / on_source_mode_change).
+SOURCE_BAZIS = "Базис"
+SOURCE_INSIGHT = "inSight"
+
+# ---------------------------------------------------------------------------
+# Настройки программы: назначение клавиш в "Просмотре эскизов"
+# ---------------------------------------------------------------------------
+
+# Клавиши окна просмотра можно переназначить (кнопка "Настройки"). Каждое
+# действие — (ключ, подпись, клавиша по умолчанию). Клавиша хранится как
+# tkinter-последовательность ("<space>", "<Alt_R>") — её же и показываем
+# пользователю в человеческом виде через key_caption().
+KEYBIND_ACTIONS = (
+    ("work", "Взять в работу", "<space>"),
+    # Правый Alt — под большим пальцем рядом с пробелом: отметил деталь и
+    # тут же кромку, не убирая руку.
+    ("edge", "Отметить кромку", "<Alt_R>"),
+    ("prev", "Предыдущая деталь", "<Left>"),
+    ("next", "Следующая деталь", "<Right>"),
+    ("apply", "Применить и закрыть", "<Return>"),
+    ("cancel", "Закрыть без изменений", "<Escape>"),
+)
+DEFAULT_KEYBINDS = {key: default for key, _label, default in KEYBIND_ACTIONS}
+
+# Человеческие названия клавиш для подписей в интерфейсе.
+KEY_CAPTIONS = {
+    "<space>": "ПРОБЕЛ", "<Return>": "Enter", "<Escape>": "Esc",
+    "<Left>": "←", "<Right>": "→", "<Up>": "↑", "<Down>": "↓",
+    "<Alt_R>": "правый Alt", "<Alt_L>": "левый Alt",
+    "<Control_R>": "правый Ctrl", "<Control_L>": "левый Ctrl",
+    "<Shift_R>": "правый Shift", "<Shift_L>": "левый Shift",
+    "<Prior>": "PgUp", "<Next>": "PgDn", "<Tab>": "Tab",
+    "<BackSpace>": "Backspace", "<Insert>": "Insert", "<Delete>": "Delete",
+}
+
+
+def key_caption(sequence):
+    """Как показать клавишу пользователю: "<Alt_R>" -> "правый Alt"."""
+    if sequence in KEY_CAPTIONS:
+        return KEY_CAPTIONS[sequence]
+    inner = (sequence or "").strip("<>")
+    return inner.upper() if len(inner) == 1 else inner
+
+
+# Настройки живут в домашней папке пользователя, а не рядом с .exe: программа
+# нередко лежит в папке, куда писать нельзя (Program Files, сетевой диск).
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".excel_data_structure_app.json")
+
+
+def load_settings():
+    """Настройки с диска. Любая ошибка чтения — не повод не запускаться:
+    молча берём значения по умолчанию."""
+    keybinds = dict(DEFAULT_KEYBINDS)
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001 — нет файла, битый JSON, нет прав
+        return keybinds
+    stored = data.get("keybinds") or {}
+    for key in DEFAULT_KEYBINDS:
+        value = stored.get(key)
+        if isinstance(value, str) and value:
+            keybinds[key] = value
+    return keybinds
+
+
+def save_settings(keybinds):
+    """Сохраняет настройки. Не смогли записать — так и скажем вызывающему,
+    но программу из-за этого не роняем."""
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump({"keybinds": keybinds}, f, ensure_ascii=False, indent=2)
+        return None
+    except Exception as e:  # noqa: BLE001 — нет прав, диск полон
+        return str(e)
 
 # Иконка приложения — плоская пиктограмма-таблица, отдельная под каждую тему
 # (тёмный/светлый фон + акцентный синий каждой темы), 32x32 и 64x64 PNG,
@@ -1839,6 +1912,116 @@ class OrderSelectionDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class SettingsDialog(ctk.CTkToplevel):
+    """Настройки программы. Пока один раздел — назначение клавиш в окне
+    "Просмотр эскизов" (см. KEYBIND_ACTIONS).
+
+    Клавиша меняется так: нажал "Изменить" — кнопка ждёт нажатия любой
+    клавиши и запоминает её. Esc во время ожидания отменяет: иначе им
+    нельзя было бы закрыть окно, не назначив его на что-нибудь.
+
+    Настройки сохраняются сразу (`on_change`), отдельной кнопки "OK" нет."""
+
+    def __init__(self, master, colors, icon_images, theme, keybinds, on_change, on_reset):
+        super().__init__(master)
+        self.title("Настройки")
+        self.resizable(False, False)
+        self.configure(fg_color=colors["bg"])
+        self.transient(master)
+        _apply_window_icon(self, icon_images, theme)
+        set_windows_dark_titlebar(self, dark=(theme == "dark"))
+
+        self._colors = colors
+        self._keybinds = keybinds
+        self._on_change = on_change
+        self._waiting_for = None   # какое действие ждёт нажатия клавиши
+        self._key_labels = {}
+        self._buttons = {}
+
+        content = ctk.CTkFrame(
+            self, fg_color=colors["card"], corner_radius=16,
+            border_width=1, border_color=colors["border"],
+        )
+        content.grid(row=0, column=0, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            content, text="Назначение клавиш", text_color=colors["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, padx=20, pady=(20, 2), sticky="w")
+        ctk.CTkLabel(
+            content, text='Клавиши окна "Просмотр эскизов".',
+            text_color=colors["muted"],
+        ).grid(row=1, column=0, columnspan=3, padx=20, pady=(0, 12), sticky="w")
+
+        for i, (key, label, _default) in enumerate(KEYBIND_ACTIONS, start=2):
+            ctk.CTkLabel(
+                content, text=label, text_color=colors["text"], anchor="w", width=220,
+            ).grid(row=i, column=0, padx=(20, 10), pady=4, sticky="w")
+            var = tk.StringVar(value=key_caption(keybinds.get(key, DEFAULT_KEYBINDS[key])))
+            self._key_labels[key] = var
+            ctk.CTkLabel(
+                content, textvariable=var, text_color=colors["text"], width=130,
+                fg_color=colors["input"], corner_radius=8, height=30,
+                font=ctk.CTkFont(size=13, weight="bold"),
+            ).grid(row=i, column=1, padx=(0, 10), pady=4)
+            btn = ctk.CTkButton(
+                content, text="Изменить", width=110, height=30, corner_radius=20,
+                fg_color=colors["card"], hover_color=colors["input"],
+                text_color=colors["text"], border_width=1, border_color=colors["border"],
+                command=lambda k=key: self._start_capture(k),
+            )
+            btn.grid(row=i, column=2, padx=(0, 20), pady=4)
+            self._buttons[key] = btn
+
+        btn_row = ctk.CTkFrame(content, fg_color=colors["card"])
+        btn_row.grid(row=len(KEYBIND_ACTIONS) + 2, column=0, columnspan=3, pady=(14, 20))
+        ctk.CTkButton(
+            btn_row, text="По умолчанию", command=lambda: self._reset(on_reset),
+            width=140, height=32, corner_radius=20, fg_color=colors["card"],
+            hover_color=colors["input"], text_color=colors["text"],
+            border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="Закрыть", command=self.destroy, width=110, height=32,
+            corner_radius=20, fg_color=colors["accent"],
+            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
+        ).pack(side="left")
+
+        self.bind("<KeyPress>", self._on_key)
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        self.focus_force()
+
+    def _start_capture(self, key):
+        if self._waiting_for is not None:
+            self._buttons[self._waiting_for].configure(text="Изменить")
+        self._waiting_for = key
+        self._buttons[key].configure(text="Нажмите...")
+        self.focus_set()
+
+    def _on_key(self, event):
+        if self._waiting_for is None:
+            return
+        key = self._waiting_for
+        self._waiting_for = None
+        self._buttons[key].configure(text="Изменить")
+        if event.keysym == "Escape":
+            return  # передумали — оставляем как было
+        sequence = f"<{event.keysym}>"
+        self._keybinds[key] = sequence
+        self._key_labels[key].set(key_caption(sequence))
+        self._on_change(self._keybinds)
+
+    def _reset(self, on_reset):
+        self._keybinds.update(DEFAULT_KEYBINDS)
+        for key, var in self._key_labels.items():
+            var.set(key_caption(DEFAULT_KEYBINDS[key]))
+        on_reset()
+
+
 class LogDialog(ctk.CTkToplevel):
     """Журнал разбора отдельным окном (кнопка "Логи" под таблицей). Раньше
     журнал был сворачиваемой карточкой прямо в окне — от неё отказались,
@@ -2173,10 +2356,10 @@ class SketchReviewDialog(ctk.CTkToplevel):
         else:
             new_img = None
             if not self._index:
-                note = ("Эскизы не выбраны.\n\n"
-                        "Выгрузите их из Базиса в PDF — программа сама подхватит их\n"
-                        'из папки заказа ("эск", "Эскизы"), либо укажите вручную\n'
-                        'в поле "Эскизы заказа (PDF)".')
+                note = ("Эскизы не найдены.\n\n"
+                        "Выгрузите их из Базиса в PDF прямо в папку заказа —\n"
+                        'в подпапку "эск" ("Эскизы" и т.п.) или файлами со словом\n'
+                        '"эск" в имени — и разберите заказ заново.')
             else:
                 note = (f"Для детали {part} эскиз среди выбранных файлов не найден —\n"
                         "показывать нечего. Решайте по названию и материалу справа.")
@@ -2259,6 +2442,11 @@ class SketchExtractorApp:
         # Заводим ДО сборки интерфейса: _build_buttons рисует счётчик на кнопке.
         self.log_lines = []
 
+        # Назначение клавиш в "Просмотре эскизов" — единственная пока
+        # настройка, живёт в файле в домашней папке (см. load_settings).
+        # Заводим ДО сборки интерфейса: окно просмотра берёт клавиши отсюда.
+        self.keybinds = load_settings()
+
         # Интерфейс собирается по частям: каждый метод строит свой блок, а
         # порядок вызовов = порядок блоков в окне сверху вниз (виджеты
         # раскладываются через pack, так что порядок здесь важен).
@@ -2331,18 +2519,19 @@ class SketchExtractorApp:
 
         label_width = 190
 
-        # Что разбираем — папку дня (обычный режим) или один заказ. От этого
-        # зависит и кнопка "Выбрать...", и что делают кнопки этапов ниже.
+        # Откуда заказ: у Базиса можно взять и папку дня целиком, и один
+        # файл .bln; у inSight — только PDF-выгрузку. От этого зависят и
+        # кнопки выбора рядом с полем пути, и этапы ниже.
         mode_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         mode_row.pack(fill="x", padx=16, pady=4)
         self._reg(mode_row, "plain_frame")
-        mode_label = ctk.CTkLabel(mode_row, text="Что разбираем:", width=label_width, anchor="w")
+        mode_label = ctk.CTkLabel(mode_row, text="Откуда заказ:", width=label_width, anchor="w")
         mode_label.pack(side="left")
         self._reg(mode_label, "label")
-        self.mode_var = tk.StringVar(value=MODE_DAY)
+        self.mode_var = tk.StringVar(value=SOURCE_BAZIS)
         self.mode_switch = ctk.CTkSegmentedButton(
-            mode_row, values=[MODE_DAY, MODE_SINGLE], variable=self.mode_var,
-            command=self.on_mode_change, height=32, corner_radius=20, width=320,
+            mode_row, values=[SOURCE_BAZIS, SOURCE_INSIGHT], variable=self.mode_var,
+            command=self.on_source_mode_change, height=32, corner_radius=20, width=280,
         )
         self.mode_switch.pack(side="left")
         self._reg(self.mode_switch, "segmented")
@@ -2350,7 +2539,7 @@ class SketchExtractorApp:
         file_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         file_row.pack(fill="x", padx=16, pady=4)
         self._reg(file_row, "plain_frame")
-        self.path_label = ctk.CTkLabel(file_row, text="Папка дня:", width=label_width, anchor="w")
+        self.path_label = ctk.CTkLabel(file_row, text="Папка дня или заказ:", width=label_width, anchor="w")
         self.path_label.pack(side="left")
         self._reg(self.path_label, "label")
         self.path_entry = ctk.CTkEntry(file_row)
@@ -2361,45 +2550,20 @@ class SketchExtractorApp:
         if HAS_DND:
             self.path_entry.drop_target_register(DND_FILES)
             self.path_entry.dnd_bind("<<Drop>>", self.on_drop)
+        # Две кнопки: папка дня и один заказ. У inSight папки дня не бывает,
+        # поэтому там первая прячется (см. on_source_mode_change).
+        self.browse_day_btn = ctk.CTkButton(
+            file_row, text="Папка дня...", command=self.browse_day_folder,
+            height=32, width=130, corner_radius=20,
+        )
+        self.browse_day_btn.pack(side="left")
+        self._reg(self.browse_day_btn, "secondary_button")
         self.browse_btn = ctk.CTkButton(
-            file_row, text="Выбрать...", command=self.browse_path,
-            height=32, width=120, corner_radius=20,
+            file_row, text="Один заказ...", command=self.browse_single_order,
+            height=32, width=130, corner_radius=20,
         )
-        self.browse_btn.pack(side="left")
+        self.browse_btn.pack(side="left", padx=(8, 0))
         self._reg(self.browse_btn, "secondary_button")
-
-        # Эскизы Базиса в PDF. Обычно указывать их руками не нужно: после
-        # разбора программа сама берёт PDF из папки заказа (подпапка "эск"/
-        # "Эскизы" или файлы с "эск" в имени, см. find_sketch_pdfs_for_order).
-        # Кнопки рядом — на случай, когда эскизы лежат где-то ещё.
-        sketch_row = ctk.CTkFrame(main_card, fg_color=t["card"])
-        sketch_row.pack(fill="x", padx=16, pady=4)
-        self._reg(sketch_row, "plain_frame")
-        sketch_label = ctk.CTkLabel(
-            sketch_row, text="Эскизы заказа (PDF):", width=label_width, anchor="w",
-        )
-        sketch_label.pack(side="left")
-        self._reg(sketch_label, "label")
-        self.sketch_pdf_entry = ctk.CTkEntry(sketch_row)
-        self.sketch_pdf_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self._reg(self.sketch_pdf_entry, "entry")
-        fix_clipboard_shortcuts(self.sketch_pdf_entry)
-        if HAS_DND:
-            self.sketch_pdf_entry.drop_target_register(DND_FILES)
-            self.sketch_pdf_entry.dnd_bind("<<Drop>>", self.on_drop_sketch_pdf)
-        self.browse_sketch_pdf_btn = ctk.CTkButton(
-            sketch_row, text="Файлы...", command=self.browse_sketch_pdf,
-            height=32, width=100, corner_radius=20,
-        )
-        self.browse_sketch_pdf_btn.pack(side="left")
-        self._reg(self.browse_sketch_pdf_btn, "secondary_button")
-        # Выделять сотню PDF по одному незачем — папка "эск" целиком.
-        self.browse_sketch_dir_btn = ctk.CTkButton(
-            sketch_row, text="Папка...", command=self.browse_sketch_folder,
-            height=32, width=100, corner_radius=20,
-        )
-        self.browse_sketch_dir_btn.pack(side="left", padx=(8, 0))
-        self._reg(self.browse_sketch_dir_btn, "secondary_button")
 
         type_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         type_row.pack(fill="x", padx=16, pady=4)
@@ -2655,6 +2819,15 @@ class SketchExtractorApp:
         )
         self.log_btn.pack(side="right")
         self._reg(self.log_btn, "secondary_button", surface="bg")
+
+        # Настройки (пока только назначение клавиш) — рядом с логами:
+        # заходят туда так же редко.
+        self.settings_btn = ctk.CTkButton(
+            btn_frame, text="Настройки", command=self.open_settings_dialog,
+            height=32, width=120, corner_radius=20,
+        )
+        self.settings_btn.pack(side="right", padx=(0, 8))
+        self._reg(self.settings_btn, "secondary_button", surface="bg")
 
     def _reg(self, widget, kind, surface="card"):
         # surface — какой фон стоит НЕПОСРЕДСТВЕННО за виджетом ("bg" — фон
@@ -3079,122 +3252,100 @@ class SketchExtractorApp:
         path = event.data.strip().strip("{}")
         self.path_entry.delete(0, tk.END)
         self.path_entry.insert(0, path)
-        # Переключатель режима подтягиваем под то, что бросили: иначе он
-        # говорил бы одно, а в поле лежало другое.
-        self.mode_var.set(MODE_DAY if os.path.isdir(path) else MODE_SINGLE)
-        self.on_mode_change()
+        # Переключатель подтягиваем под то, что бросили: иначе он говорил бы
+        # одно, а в поле лежало другое.
+        is_pdf = os.path.isfile(path) and path.lower().endswith(".pdf")
+        self.mode_var.set(SOURCE_INSIGHT if is_pdf else SOURCE_BAZIS)
+        self.on_source_mode_change()
         self.run_parse()
 
-    def on_mode_change(self, choice=None):
-        """Переключатель "Папка дня / Один заказ" — меняем подпись у поля
-        пути и гасим первый этап: сортировать имеет смысл только папку дня."""
-        day = self.mode_var.get() == MODE_DAY
-        self.path_label.configure(text="Папка дня:" if day else "Файл заказа:")
-        self.mark_btn.configure(state="normal" if day else "disabled")
+    def on_source_mode_change(self, choice=None):
+        """Переключатель "Базис / inSight". У Базиса два способа выбора —
+        папка дня и один заказ, у inSight только PDF-выгрузка, и этап
+        сортировки там не нужен вовсе."""
+        bazis = self.mode_var.get() == SOURCE_BAZIS
+        if bazis:
+            self.path_label.configure(text="Папка дня или заказ:")
+            self.browse_day_btn.pack(side="left", before=self.browse_btn)
+            self.browse_btn.configure(text="Один заказ...")
+        else:
+            self.path_label.configure(text="Файл PDF:")
+            self.browse_day_btn.pack_forget()
+            self.browse_btn.configure(text="Выбрать PDF...")
+        self.mark_btn.configure(state="normal" if bazis else "disabled")
         self.parse_btn.configure(
-            text="2 · Разобрать и отметить" if day else "Разобрать заказ")
+            text="Разобрать и отметить" if bazis else "Разобрать PDF")
+
+    def browse_day_folder(self):
+        """Папка дня со всеми заказами Базиса. Сразу не разбираем: дальше
+        пользователь сам решает — сортировать или разбирать."""
+        path = filedialog.askdirectory(
+            title="Выберите папку дня (внутри — папки заказов с файлами .bln)",
+        )
+        if not path:
+            return
+        self.mode_var.set(SOURCE_BAZIS)
+        self.on_source_mode_change()
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, path)
+        self.status_var.set(
+            f"Папка дня: {os.path.basename(os.path.normpath(path))} — дальше "
+            f'"Отсортировать заказы" или сразу "Разобрать и отметить".'
+        )
+
+    def browse_single_order(self):
+        """Один файл заказа: .bln у Базиса, .pdf у inSight. Разбираем сразу —
+        этапов тут нет."""
+        if self.mode_var.get() == SOURCE_BAZIS:
+            filetypes = [("Библиотека Базис", "*.bln"), ("Все файлы", "*.*")]
+            title = "Выберите файл заказа Базиса (.bln)"
+        else:
+            filetypes = [("PDF-выгрузка inSight", "*.pdf"), ("Все файлы", "*.*")]
+            title = "Выберите PDF-выгрузку inSight"
+        path = filedialog.askopenfilename(title=title, filetypes=filetypes)
+        if not path:
+            return
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, path)
+        self.run_parse()
 
     def ask_for_path(self):
-        """Спрашивает путь по текущему режиму и кладёт его в поле. Нужен,
-        чтобы кнопки этапов работали "в одно нажатие" — даже когда путь ещё
-        не выбран."""
-        if self.mode_var.get() == MODE_DAY:
+        """Спрашивает путь, когда кнопка этапа нажата с пустым полем — чтобы
+        этап проходился в одно нажатие. Для Базиса спрашиваем папку дня (это
+        обычный случай), для inSight — файл PDF."""
+        if self.mode_var.get() == SOURCE_BAZIS:
             path = filedialog.askdirectory(
                 title="Выберите папку дня (внутри — папки заказов с файлами .bln)",
             )
         else:
             path = filedialog.askopenfilename(
-                title="Выберите файл заказа",
-                filetypes=[
-                    ("Библиотека Базис / PDF-эскиз", "*.bln *.pdf"),
-                    ("Библиотека Базис", "*.bln"),
-                    ("PDF-эскиз inSight", "*.pdf"),
-                    ("Все файлы", "*.*"),
-                ],
+                title="Выберите PDF-выгрузку inSight",
+                filetypes=[("PDF-выгрузка inSight", "*.pdf"), ("Все файлы", "*.*")],
             )
         if path:
             self.path_entry.delete(0, tk.END)
             self.path_entry.insert(0, path)
         return path
 
-    def browse_path(self):
-        """Кнопка "Выбрать...". Один заказ разбираем сразу — там этапов нет;
-        папку дня только запоминаем, дальше решают кнопки этапов."""
-        path = self.ask_for_path()
-        if not path:
-            return
-        if self.mode_var.get() == MODE_SINGLE:
-            self.run_parse()
-        else:
-            self.status_var.set(
-                f"Папка дня: {os.path.basename(os.path.normpath(path))} — "
-                f'дальше "1 · Отсортировать" или сразу "2 · Разобрать".'
-            )
-
-    def browse_sketch_pdf(self):
-        paths = filedialog.askopenfilenames(
-            title="Выберите PDF с эскизами этого заказа (можно все сразу)",
-            filetypes=[("PDF с эскизами", "*.pdf"), ("Все файлы", "*.*")],
+    def open_settings_dialog(self):
+        SettingsDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            self.keybinds, self._save_keybinds, lambda: self._save_keybinds(self.keybinds),
         )
-        if paths:
-            self.set_sketch_pdfs(list(paths))
 
-    def browse_sketch_folder(self):
-        """Папка с эскизами целиком — удобнее, чем выделять сотню PDF по
-        одному. Берём все .pdf внутри, включая вложенные папки."""
-        folder = filedialog.askdirectory(title="Выберите папку с эскизами заказа (PDF)")
-        if not folder:
-            return
-        paths = []
-        for root_dir, _dirs, files in os.walk(folder):
-            paths.extend(
-                os.path.join(root_dir, f) for f in sorted(files)
-                if f.lower().endswith(".pdf")
-            )
-        if not paths:
-            self.show_message("Пусто", f"В этой папке нет ни одного PDF:\n{folder}")
-            return
-        self.set_sketch_pdfs(paths)
-
-    def on_drop_sketch_pdf(self, event):
-        # Перетащить можно и несколько файлов разом, и папку с ними — тогда
-        # берём все .pdf внутри.
-        try:
-            dropped = self.root.tk.splitlist(event.data)
-        except Exception:  # noqa: BLE001 — на всякий случай разбираем вручную
-            dropped = [event.data.strip().strip("{}")]
-        paths = []
-        for item in dropped:
-            item = item.strip().strip("{}")
-            if os.path.isdir(item):
-                paths.extend(
-                    os.path.join(item, n) for n in sorted(os.listdir(item))
-                    if n.lower().endswith(".pdf")
-                )
-            elif item:
-                paths.append(item)
-        if paths:
-            self.set_sketch_pdfs(paths)
+    def _save_keybinds(self, keybinds):
+        self.keybinds = dict(keybinds)
+        error = save_settings(self.keybinds)
+        if error:
+            self.log(f"⚠ Не удалось сохранить настройки: {error}")
 
     def set_sketch_pdfs(self, paths, auto=False):
-        """Список файлов эскизов. В поле показываем по-человечески: один
-        файл — именем, несколько — количеством и общей папкой. auto=True —
-        файлы нашлись сами в папках заказов, так и подписываем: иначе
-        непонятно, откуда они там взялись."""
+        """Файлы эскизов для "Просмотра". Отдельного поля в окне под них нет
+        (ИСТОРИЯ: было, убрали) — программа находит их сама в папках
+        разобранных заказов, а сколько нашлось, видно в журнале и в итоговом
+        окне разбора папки дня."""
         self.sketch_pdf_paths = list(paths)
         self._sketch_pdfs_auto = bool(auto and paths)
-        self.sketch_pdf_entry.configure(state="normal")
-        self.sketch_pdf_entry.delete(0, tk.END)
-        if auto and paths:
-            folders = len({os.path.dirname(p) for p in paths})
-            where = f"{folders} папках заказов" if folders > 1 else os.path.dirname(paths[0])
-            self.sketch_pdf_entry.insert(0, f"найдено само: {len(paths)}  —  {where}")
-        elif len(paths) == 1:
-            self.sketch_pdf_entry.insert(0, paths[0])
-        elif paths:
-            folder = os.path.dirname(paths[0])
-            self.sketch_pdf_entry.insert(0, f"файлов: {len(paths)}  —  {folder}")
-        self.sketch_pdf_entry.configure(state="readonly")
 
     def mark_day_folder(self):
         """Первый этап отбора: пройтись по папкам заказов в папке дня и
@@ -3207,8 +3358,8 @@ class SketchExtractorApp:
                 return
             self.path_entry.delete(0, tk.END)
             self.path_entry.insert(0, path)
-            self.mode_var.set(MODE_DAY)
-            self.on_mode_change()
+            self.mode_var.set(SOURCE_BAZIS)
+            self.on_source_mode_change()
 
         try:
             items, warnings, stats = mark_order_folders(path)
@@ -3368,13 +3519,12 @@ class SketchExtractorApp:
         """Гасит кнопки на время разбора: копировать ещё нечего, а очистка или
         выбор нового файла посреди чтения только запутали бы."""
         state = "disabled" if busy else "normal"
-        for btn in (self.browse_btn, self.parse_btn,
-                    self.browse_sketch_pdf_btn, self.browse_sketch_dir_btn,
+        for btn in (self.browse_btn, self.browse_day_btn, self.parse_btn,
                     self.clear_btn, self.copy_btn, self.review_btn):
             btn.configure(state=state)
         # Первый этап только для папки дня — в режиме одного заказа кнопка
-        # и так погашена (см. on_mode_change), не включаем её обратно.
-        if not busy and self.mode_var.get() != MODE_DAY:
+        # и так погашена (см. on_source_mode_change), не включаем её обратно.
+        if not busy and self.mode_var.get() != SOURCE_BAZIS:
             self.mark_btn.configure(state="disabled")
         else:
             self.mark_btn.configure(state=state)
