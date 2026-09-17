@@ -1718,24 +1718,29 @@ class MessageDialog(ctk.CTkToplevel):
         self.wait_window()
 
 
-class CopySelectionDialog(ctk.CTkToplevel):
-    """Список всех видов деталей (по столбцу "Описание"), найденных при
-    последнем разборе файла — с галочками. Галочка = "этот вид копируем в
-    буфер". Отмеченные идут наверх списка, снятые — вниз. Сняты по
-    умолчанию те виды, что программа сама считает не идущими на станок
-    (сборка/стекло/3мм и т.п.), — но пользователь может отметить/снять
-    отметку с любого вида вручную: все строки этого вида сразу перестают
-    краситься серым в таблице и начинают копироваться (или наоборот).
 
-    "Сбросить" возвращает только автоматику (убирает все ручные
-    переопределения), "Выбрать всё" отмечает вообще все виды (включая те,
-    что программа сняла сама — временно копируем всё), "Готово" просто
-    закрывает окно — все изменения уже применяются сразу по клику."""
+class ExcludeSelectionDialog(ctk.CTkToplevel):
+    """Список всех видов деталей текущего разбора — с галочками "исключить".
+
+    ГАЛОЧКА = "этот вид НЕ копируем". По умолчанию отмечено то, что
+    программа и так считает непроходящим по станку (сборка, стекло/зеркало,
+    3 и 4 мм, детали из NOT_MACHINABLE_PART_NAMES) — то есть окно сразу
+    показывает готовый список исключений, и обычно его достаточно просто
+    посмотреть. Отмеченные (исключённые) идут ВВЕРХУ списка, остальные —
+    ниже: смотреть надо именно на исключения.
+
+    "Сбросить" возвращает автоматику (убирает ручные переопределения),
+    "Ничего не исключать" снимает все галочки, "Готово" просто закрывает
+    окно — изменения применяются сразу по клику.
+
+    ИСТОРИЯ: раньше это был диалог "Что копировать" с обратным смыслом
+    галочки (отмечено = копируем) и отмеченными по умолчанию ВСЕМИ видами.
+    Не возвращать без явной просьбы."""
 
     def __init__(self, master, colors, icon_images, theme, counts, checked_state,
                  hints, on_toggle, on_reset, on_select_all):
         super().__init__(master)
-        self.title("Что копировать")
+        self.title("Исключить")
         self.resizable(False, False)
         self.configure(fg_color=colors["bg"])
         self.transient(master)
@@ -1752,7 +1757,9 @@ class CopySelectionDialog(ctk.CTkToplevel):
         self._content.grid(row=0, column=0, padx=16, pady=16)
 
         ctk.CTkLabel(
-            self._content, text="Отметьте виды деталей, которые нужно копировать в буфер:",
+            self._content,
+            text="Отмечены виды деталей, которые НЕ попадут в буфер.\n"
+                 "Снимите галочку, если вид всё-таки нужно скопировать:",
             text_color=colors["text"], wraplength=470, justify="left",
         ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
 
@@ -1775,7 +1782,8 @@ class CopySelectionDialog(ctk.CTkToplevel):
             text_color=colors["text"], border_width=1, border_color=colors["border"],
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
-            btn_row, text="Выбрать всё", command=on_select_all, width=110, height=32,
+            btn_row, text="Ничего не исключать", command=on_select_all,
+            width=170, height=32,
             corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
             text_color=colors["text"], border_width=1, border_color=colors["border"],
         ).pack(side="left", padx=(0, 8))
@@ -1793,14 +1801,12 @@ class CopySelectionDialog(ctk.CTkToplevel):
 
     def _build_checklist(self, counts, checked_state, hints):
         colors = self._colors
-        # Порядок: отмеченные (то, что копируем) наверх, снятые ниже, а те,
-        # что программа считает не идущими на этот станок, — в конец каждой
-        # группы: их снимают чаще всего.
+        # Порядок: отмеченные (исключённые) НАВЕРХ, остальные ниже — смотреть
+        # надо именно на список исключений.
         items = sorted(
             counts.items(),
             key=lambda pair: (
-                not checked_state.get(pair[0], True),
-                pair[0] in hints,
+                not checked_state.get(pair[0], False),
                 (pair[0][0] or "").lower(),
                 (pair[0][1] or "").lower(),
             ),
@@ -1811,15 +1817,15 @@ class CopySelectionDialog(ctk.CTkToplevel):
             # разного материала это разные виды, и различить их можно
             # только по нему (см. SketchExtractorApp._row_group_key).
             label = f"{description or '(без названия)'} ({count})"
-            hinted = group_key in hints
-            if hinted:
-                label += "  —  не на этот станок"
+            hint = hints.get(group_key)
+            if hint:
+                label += f"  —  {hint}"
             if material:
                 label += f"\n{material}"
-            var = tk.BooleanVar(value=checked_state.get(group_key, True))
+            var = tk.BooleanVar(value=checked_state.get(group_key, False))
             ctk.CTkCheckBox(
                 self._scroll, text=label, variable=var,
-                text_color=colors["muted"] if hinted else colors["text"],
+                text_color=colors["muted"] if hint else colors["text"],
                 fg_color=colors["accent"], hover_color=colors["accent_hover"],
                 border_color=colors["border"],
                 command=lambda k=group_key, v=var: self._on_toggle(k, v.get()),
@@ -2556,7 +2562,7 @@ class SketchExtractorApp:
         # {номер строки: отмечена ли "в работу"} из последнего просмотра —
         # нужно только чтобы при повторном открытии галочки стояли как были.
         self._review_marked = {}
-        self._copy_selection_dialog = None
+        self._exclude_dialog = None
         # Столбцы для копирования — {имя_столбца: копировать_ли}, по умолчанию
         # все включены; отмечаются галочками прямо в шапке таблицы (см.
         # _refresh_column_headers). В отличие от group_overrides выше, это не
@@ -2595,7 +2601,7 @@ class SketchExtractorApp:
         self._reg(self.theme_toggle_btn, "secondary_button", surface="bg")
 
     def _build_main_card(self, root, t):
-        """Карточка "Основное": файл, источник, дата запуска, "Что копировать"."""
+        """Карточка "Основное": файл, источник, дата запуска, "Действия"."""
         main_card = ctk.CTkFrame(root, corner_radius=16, border_width=1, fg_color=t["card"], border_color=t["border"])
         main_card.pack(fill="x", padx=8, pady=4)
         self._reg(main_card, "card", surface="bg")
@@ -2718,12 +2724,12 @@ class SketchExtractorApp:
         self.parse_btn.pack(side="left", padx=(8, 0))
         self._reg(self.parse_btn, "accent_button")
 
-        self.copy_selection_btn = ctk.CTkButton(
-            stage_row, text="Что копировать", command=self.open_copy_selection_dialog,
+        self.exclude_btn = ctk.CTkButton(
+            stage_row, text="Исключить", command=self.open_exclude_dialog,
             height=32, width=140, corner_radius=20,
         )
-        self.copy_selection_btn.pack(side="right")
-        self._reg(self.copy_selection_btn, "secondary_button")
+        self.exclude_btn.pack(side="right")
+        self._reg(self.exclude_btn, "secondary_button")
 
     def _build_status(self, root, t):
         """Строка состояния под карточкой + переключатель всех столбцов."""
@@ -3035,12 +3041,12 @@ class SketchExtractorApp:
             values[ready_idx] = row["ready_date"]
             self.tree.item(iid, values=values)
         self._apply_row_styling()
-        self._refresh_copy_selection_dialog()
         self.status_var.set(
             f"В работу: {len(marked_rows)} из {len(shown)}    •    "
             f"кромка: {len(edge_rows)}    •    "
             f"{OTHER_MACHINE_NAME}: {len(other_rows)}"
         )
+        self._refresh_exclude_dialog()
         self._mark_orders_without_work()
 
     def open_log_dialog(self):
@@ -3166,62 +3172,66 @@ class SketchExtractorApp:
 
     @staticmethod
     def _row_group_key(row):
-        """Вид детали для диалога "Что копировать" — ПАРА "Описание +
-        Материал", а не одно только описание: в одном заказе встречаются
-        одинаково названные детали из разного материала (например "Стенка
-        задняя" из ЛДСП 16 и она же из ХДФ 3мм), и отмечать их надо
-        по отдельности."""
+        """Вид детали для диалога "Исключить" — ПАРА "Описание + Материал",
+        а не одно только описание: в одном заказе встречаются одинаково
+        названные детали из разного материала (например "Стенка задняя" из
+        ЛДСП 16 и она же из ХДФ 3мм), и отмечать их надо по отдельности."""
         return (row["description"], row["material"])
 
-    def _copy_selection_counts_and_state(self):
-        """Виды деталей для диалога "Что копировать" и состояние галочек.
+    def _exclude_counts_and_state(self):
+        """Виды деталей для диалога "Исключить" и состояние галочек.
 
-        ВСЕ виды отмечены по умолчанию: в отчёте должно быть столько строк,
-        сколько эскизов в заказе (см. copy_for_table). Диалог остался
-        РУЧНЫМ инструментом — снять вид, если он зачем-то не нужен именно
-        сейчас; сам по себе он ничего не снимает."""
-        counts = {}
+        ГАЛОЧКА = "не копируем". По умолчанию отмечены виды, которые на
+        станке не обрабатываются вовсе (сборка, стекло/зеркало, 3 и 4 мм) и
+        те, что программа считает не идущими на этот станок — то есть
+        готовый список исключений, а не пустой лист. Ручной выбор
+        пользователя (group_overrides) всегда главнее."""
+        counts, hints = {}, {}
+        auto = {}
         for row in self.current_rows:
             key = self._row_group_key(row)
             counts[key] = counts.get(key, 0) + 1
-        checked_state = {key: self.group_overrides.get(key, True) for key in counts}
-        # Виды, которые программа считает не идущими на станок, — подсказка
-        # глазу: в диалоге они уходят вниз списка, но галочка снята НЕ будет.
-        hints = {self._row_group_key(row) for row in self.current_rows
-                 if row["auto_exclude"]}
+            reason = row.get("not_processed") or (
+                "не на этот станок" if row["auto_exclude"] else None)
+            if reason and key not in hints:
+                hints[key] = reason
+            auto[key] = auto.get(key, False) or bool(row["auto_exclude"])
+        checked_state = {key: self.group_overrides.get(key, auto.get(key, False))
+                         for key in counts}
         return counts, checked_state, hints
 
-    def open_copy_selection_dialog(self):
+    def open_exclude_dialog(self):
         if not self.current_rows:
             self.show_message("Нечего показывать", "Сначала разберите файл.")
             return
-        counts, checked_state, hints = self._copy_selection_counts_and_state()
-        self._copy_selection_dialog = CopySelectionDialog(
+        counts, checked_state, hints = self._exclude_counts_and_state()
+        self._exclude_dialog = ExcludeSelectionDialog(
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
-            counts, checked_state, hints, self.toggle_group_copying,
-            self.reset_copy_selection_to_auto, self.select_all_for_copying,
+            counts, checked_state, hints, self.toggle_group_excluded,
+            self.reset_exclusions_to_auto, self.clear_exclusions,
         )
 
-    def _refresh_copy_selection_dialog(self):
-        if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
-            self._copy_selection_dialog.refresh(*self._copy_selection_counts_and_state())
+    def _refresh_exclude_dialog(self):
+        if self._exclude_dialog is not None and self._exclude_dialog.winfo_exists():
+            self._exclude_dialog.refresh(*self._exclude_counts_and_state())
 
-    def toggle_group_copying(self, group_key, is_included):
-        self.group_overrides[group_key] = is_included
+    def toggle_group_excluded(self, group_key, is_excluded):
+        self.group_overrides[group_key] = is_excluded
         self._apply_row_styling()
 
-    def reset_copy_selection_to_auto(self):
-        # Убирает ручные переопределения — копируется снова всё подряд.
+    def reset_exclusions_to_auto(self):
+        # Убирает ручные переопределения — остаются только те исключения,
+        # которые программа проставила сама.
         self.group_overrides = {}
         self._apply_row_styling()
-        self._refresh_copy_selection_dialog()
+        self._refresh_exclude_dialog()
 
-    def select_all_for_copying(self):
+    def clear_exclusions(self):
         self.group_overrides = {
-            self._row_group_key(row): True for row in self.current_rows
+            self._row_group_key(row): False for row in self.current_rows
         }
         self._apply_row_styling()
-        self._refresh_copy_selection_dialog()
+        self._refresh_exclude_dialog()
 
     def _apply_row_styling(self):
         """Что копируется и что красится серым.
@@ -3365,8 +3375,8 @@ class SketchExtractorApp:
         self.group_overrides = {}
         self._review_rows = []
         self._review_marked = {}
-        if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
-            self._copy_selection_dialog.destroy()
+        if self._exclude_dialog is not None and self._exclude_dialog.winfo_exists():
+            self._exclude_dialog.destroy()
         self._set_empty_state(False)
         self.type_var.set("")
         self.type_combo.configure(state="disabled")
@@ -3607,8 +3617,8 @@ class SketchExtractorApp:
         self.group_overrides = {}
         self._review_rows = []
         self._review_marked = {}
-        if self._copy_selection_dialog is not None and self._copy_selection_dialog.winfo_exists():
-            self._copy_selection_dialog.destroy()
+        if self._exclude_dialog is not None and self._exclude_dialog.winfo_exists():
+            self._exclude_dialog.destroy()
         self._set_empty_state(False)
 
         self.clear_log()
