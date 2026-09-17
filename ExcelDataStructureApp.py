@@ -3686,11 +3686,14 @@ class SketchExtractorApp:
             self.order_dir_paths = dict(stats.get("order_dir_paths") or {})
             self._fill_results(kind, path, order_number, results, warnings)
             self._use_found_sketch_pdfs(stats.get("sketch_pdfs") or [])
-            self._show_folder_summary(path, stats)
             # Заказы, чей .bln не прочёлся, помечаем "[ОШИБКА]" прямо тут:
             # смотреть их придётся руками, и видно это должно быть в
             # проводнике, а не только в журнале.
             self._mark_failed_orders(stats.get("failed_dirs") or [])
+            # ИСТОРИЯ: тут показывалось окно с итогом разбора папки дня
+            # (сколько папок, сколько .bln, сколько эскизов). Убрано: после
+            # него всё равно сразу открывается просмотр, и окно только
+            # добавляло лишний клик. Не возвращать без явной просьбы.
             # Заказы выбраны, таблица есть, эскизы нашлись — сразу к просмотру:
             # ради него всё и затевалось, лишний клик тут ни к чему. Без
             # pypdfium2 показывать нечего, и ругаться на это после каждого
@@ -3716,34 +3719,7 @@ class SketchExtractorApp:
         if not paths:
             return
         self.set_sketch_pdfs(paths, auto=True)
-    def _show_folder_summary(self, day_dir, stats):
-        """Итог разбора папки дня отдельным окном — чтобы сразу было видно,
-        сколько заказов нашлось и сколько из них реально разобрано, не лазая
-        в логи."""
-        # Без выравнивания пробелами: шрифт диалога пропорциональный, столбик
-        # цифр всё равно не сойдётся, а лишние пробелы только мешают.
-        lines = [
-            f"Папка: {os.path.basename(os.path.normpath(day_dir))}",
-            "",
-            f"Папок заказов найдено: {stats.get('order_dirs', 0)}",
-            f"Из них с файлом .bln: {stats.get('dirs_with_bln', 0)}",
-            f"Заказов с эскизами: {stats.get('orders_with_sketches', 0)}",
-            f"Всего эскизов: {stats.get('sketches', 0)}",
-        ]
-        if stats.get("bln_files", 0) != stats.get("dirs_with_bln", 0):
-            lines.insert(4, f"Файлов .bln разобрано: {stats.get('bln_files', 0)}")
-        lines.append(f"Эскизов (PDF) найдено рядом: {len(stats.get('sketch_pdfs') or [])}")
 
-        problems = []
-        if stats.get("dirs_without_bln"):
-            problems.append(f"без файла .bln: {stats['dirs_without_bln']}")
-        if stats.get("failed"):
-            problems.append(f"не удалось прочесть: {stats['failed']}")
-        if problems:
-            lines += ["", "Пропущено заказов — " + ", ".join(problems) + ".",
-                      'Подробности с номерами заказов — в кнопке "Логи".']
-
-        self.show_message("Разбор папки дня завершён", "\n".join(lines), justify="left")
     def _mark_failed_orders(self, failed_dirs):
         """Папки заказов, чей .bln не удалось прочесть, получают префикс
         "[ОШИБКА]" — тот же, что и при первой фильтрации. Не открылась ни
