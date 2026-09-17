@@ -814,74 +814,72 @@ def _bln_files_in(directory):
 # Пометки на папках заказов — первый этап отбора
 # ---------------------------------------------------------------------------
 
-# Метка ставится прямо в имя папки заказа, сразу ПОСЛЕ номера заказа (номер у
-# пользователя всегда в начале имени):
-#   "217205 ❌ ГСС ООО Тумба под раковину тип 236" — эскизов нет, заказ не мой;
-#   "217205 ➜ ГСС ООО Тумба под раковину тип 236" — эскизы есть, заказ в работу;
-#   "217205 ❓ ГСС ООО Тумба под раковину тип 236" — библиотека не читается,
-#       посмотреть заказ руками (см. MARK_CHECK ниже);
-#   "217205 • ГСС ООО Тумба под раковину тип 236" — строки уже скопированы.
-# Смысл в том, чтобы не открывать каждый заказ руками: видно прямо в
-# проводнике. Метка ВСЕГДА одна — ставя новую, старую убираем
-# (см. set_order_mark), иначе после второго прогона вышло бы "217205 ➜ ➜ ...".
-MARK_NO_SKETCHES = "❌"
-MARK_HAS_SKETCHES = "➜"
-# Отдельно от "❌": там программа точно знает, что эскизов нет, а тут она
-# просто не смогла прочесть .bln (битый файл, другая версия формата, файл
-# занят). Сваливать это в "❌" нельзя — заказ выглядел бы как ненужный,
-# хотя эскизы в нём вполне могут быть.
-MARK_CHECK = "❓"
-MARK_DONE = "•"
-ORDER_MARKS = (MARK_NO_SKETCHES, MARK_HAS_SKETCHES, MARK_CHECK, MARK_DONE)
+# Программа переименовывает папки заказов ТОЛЬКО в двух случаях — когда
+# заказ можно не открывать вообще:
+#   "217205 ❌ ГСС ООО Тумба под раковину тип 236" — эскизов нет нигде:
+#       ни PDF в папке заказа, ни эскизов внутри .bln;
+#   "[ОШИБКА] 217125 Давыдова Ангелина Александровна Прихожая" — .bln не
+#       читается (битый файл, другая версия формата, файл занят), смотреть
+#       руками. Префикс стоит в НАЧАЛЕ имени, а не после номера: такие
+#       папки должны бросаться в глаза и собираться вместе при сортировке
+#       по имени.
+# Заказы, у которых эскизы есть, НЕ ПЕРЕИМЕНОВЫВАЮТСЯ вообще — ни на этом
+# этапе, ни после копирования. ИСТОРИЯ: были ещё метки "➜" (эскизы есть) и
+# "•" (строки скопированы) — отказались, слишком много переименований.
+# Не возвращать без явной просьбы.
+ORDER_MARK_NO_SKETCHES = "❌"
+ORDER_ERROR_PREFIX = "[ОШИБКА]"
 
-# Папка заказа = имя начинается с номера заказа (5-7 цифр). Всё, что на это
-# не похоже, метками не трогаем вообще: в папке дня может лежать что угодно.
+# Состояния папки заказа (что дописано в имя): None — имя чистое.
+ORDER_STATE_NO_SKETCHES = "no_sketches"
+ORDER_STATE_ERROR = "error"
+
+# Папка заказа = имя начинается с номера заказа (5-7 цифр), возможно после
+# префикса ошибки. Всё, что на это не похоже, не трогаем вообще: в папке дня
+# может лежать что угодно.
 ORDER_DIR_RE = re.compile(r"^\s*(\d{5,7})\s*(.*)$")
 
 
-def order_mark_of(name):
-    """Метка папки заказа или None, если её нет."""
-    m = ORDER_DIR_RE.match(name or "")
-    if not m:
-        return None
-    rest = m.group(2).lstrip()
-    return rest[0] if rest[:1] in ORDER_MARKS else None
-
-
-def strip_order_mark(name):
-    """Имя папки без метки. Метки снимаем все подряд — на случай, если в имя
-    руками попало сразу несколько."""
-    m = ORDER_DIR_RE.match(name or "")
+def strip_order_marks(name):
+    """Имя папки без всего, что дописала программа: без префикса ошибки и
+    без "❌" после номера. Нужно и чтобы не плодить пометки при повторном
+    прогоне, и чтобы СНЯТЬ устаревшую — если эскизы у заказа появились."""
+    name = (name or "").strip()
+    while name.startswith(ORDER_ERROR_PREFIX):
+        name = name[len(ORDER_ERROR_PREFIX):].lstrip()
+    m = ORDER_DIR_RE.match(name)
     if not m:
         return name
     rest = m.group(2).lstrip()
-    while rest[:1] in ORDER_MARKS:
+    while rest[:1] == ORDER_MARK_NO_SKETCHES:
         rest = rest[1:].lstrip()
     return f"{m.group(1)} {rest}".strip() if rest else m.group(1)
 
 
-def set_order_mark(name, mark):
-    """Имя папки с новой меткой вместо старой (см. ORDER_MARKS)."""
-    base = strip_order_mark(name)
-    m = ORDER_DIR_RE.match(base)
-    if not m:
-        return base  # не папка заказа — не выдумываем ей имя
-    rest = m.group(2).strip()
-    return f"{m.group(1)} {mark} {rest}".strip() if rest else f"{m.group(1)} {mark}"
+def order_state_of(name):
+    """Что программа уже дописала в имя папки: ORDER_STATE_* или None."""
+    name = (name or "").strip()
+    if name.startswith(ORDER_ERROR_PREFIX):
+        return ORDER_STATE_ERROR
+    m = ORDER_DIR_RE.match(name)
+    if m and m.group(2).lstrip()[:1] == ORDER_MARK_NO_SKETCHES:
+        return ORDER_STATE_NO_SKETCHES
+    return None
 
 
-def set_order_dir_mark(order_dir, mark):
-    """Переименовывает папку заказа под новую метку, возвращает новый путь.
-
-    Если метка уже такая — путь возвращается как есть. Ошибку os.rename
-    (папка открыта в проводнике, нет прав) ловит вызывающий код."""
-    parent, name = os.path.split(os.path.normpath(order_dir))
-    new_name = set_order_mark(name, mark)
-    if new_name == name:
-        return order_dir
-    new_path = os.path.join(parent, new_name)
-    os.rename(order_dir, new_path)
-    return new_path
+def order_name_for_state(name, state):
+    """Имя папки под нужное состояние. state=None — чистое имя."""
+    base = strip_order_marks(name)
+    if state == ORDER_STATE_ERROR:
+        return f"{ORDER_ERROR_PREFIX} {base}"
+    if state == ORDER_STATE_NO_SKETCHES:
+        m = ORDER_DIR_RE.match(base)
+        if not m:
+            return base  # не папка заказа — не выдумываем ей имя
+        rest = m.group(2).strip()
+        mark = ORDER_MARK_NO_SKETCHES
+        return f"{m.group(1)} {mark} {rest}".strip() if rest else f"{m.group(1)} {mark}"
+    return base
 
 
 def find_sketch_pdfs_for_order(order_dir):
@@ -966,27 +964,25 @@ def list_order_dirs(day_dir):
     for name in entries:
         sub = os.path.join(day_dir, name)
         if os.path.isdir(sub):
-            out.append((name, order_mark_of(name), bool(_bln_files_in(sub))))
+            out.append((name, order_state_of(name), bool(_bln_files_in(sub))))
     return out
 
 
 def mark_order_folders(day_dir):
-    """Первый этап отбора: помечает папки заказов внутри папки дня.
+    """Первая фильтрация: помечает папки заказов, которые можно не открывать.
 
-    Заказ считается "моим" (метка ➜), если эскизы есть ХОТЬ ГДЕ-ТО одном:
-    либо уже выгружены в папку заказа в PDF, либо лежат внутри .bln. Если
-    нет нигде — метка ❌, такой заказ можно не открывать вообще.
+    Переименовываются ТОЛЬКО две категории:
+      - эскизов нет НИГДЕ (ни PDF в папке заказа, ни эскизов внутри .bln) →
+        "❌" после номера заказа;
+      - .bln не читается (битый файл, другая версия формата, файл занят) →
+        префикс "[ОШИБКА]" в начале имени, смотреть руками.
+    Заказы, у которых эскизы есть, НЕ ТРОГАЮТСЯ вовсе.
 
-    Если .bln прочесть не удалось (битый файл, другая версия формата, файл
-    занят) — метка ❓: посмотреть этот заказ руками. Отдельно от ❌ именно
-    потому, что "эскизов нет" и "не смог посмотреть" — разные вещи, и во
-    втором случае эскизы вполне могут быть.
+    Единственное исключение из "не трогаем": УСТАРЕВШАЯ пометка снимается.
+    Если у заказа с "❌" эскизы появились (пользователь их выгрузил), имя
+    чистится — иначе пометка врала бы.
 
-    Папки, уже помеченные "•" (заказ разнесён по таблице), не трогаем —
-    иначе после копирования они снова становились бы "➜", и было бы
-    непонятно, сделан заказ или нет.
-
-    Возвращает (items, warnings, stats), items — [(итоговое имя, метка), ...].
+    Возвращает (items, warnings, stats), items — [(итоговое имя, состояние)].
     """
     try:
         entries = sorted(os.listdir(day_dir))
@@ -996,18 +992,14 @@ def mark_order_folders(day_dir):
     warnings = []
     items = []
     stats = {"with_sketches": 0, "without_sketches": 0, "unreadable": 0,
-             "already_done": 0, "renamed": 0, "not_order_dirs": 0}
+             "renamed": 0, "cleaned": 0, "not_order_dirs": 0}
 
     for name in entries:
         src = os.path.join(day_dir, name)
         if not os.path.isdir(src):
             continue
-        if not ORDER_DIR_RE.match(name):
+        if not ORDER_DIR_RE.match(strip_order_marks(name)):
             stats["not_order_dirs"] += 1
-            continue
-        if order_mark_of(name) == MARK_DONE:
-            stats["already_done"] += 1
-            items.append((name, MARK_DONE))
             continue
 
         has_sketches = bool(find_sketch_pdfs_for_order(src))
@@ -1025,23 +1017,23 @@ def mark_order_folders(day_dir):
                     )
 
         if has_sketches:
-            mark, key = MARK_HAS_SKETCHES, "with_sketches"
+            state, key = None, "with_sketches"
         elif unreadable:
             # Прочесть не смогли — не утверждаем, что эскизов нет.
-            mark, key = MARK_CHECK, "unreadable"
+            state, key = ORDER_STATE_ERROR, "unreadable"
         else:
-            mark, key = MARK_NO_SKETCHES, "without_sketches"
+            state, key = ORDER_STATE_NO_SKETCHES, "without_sketches"
         stats[key] += 1
 
-        new_name = set_order_mark(name, mark)
+        new_name = order_name_for_state(name, state)
         if new_name != name:
             try:
                 os.rename(src, os.path.join(day_dir, new_name))
-                stats["renamed"] += 1
+                stats["cleaned" if state is None else "renamed"] += 1
             except OSError as e:
                 warnings.append(f'Не удалось переименовать папку "{name}" — {e}')
                 new_name = name
-        items.append((new_name, mark))
+        items.append((new_name, state))
 
     if not items:
         warnings.append(
@@ -1064,8 +1056,7 @@ def find_order_bln_files(day_dir, only_dirs=None):
     этапе (см. OrderSelectionDialog); None — разбираем все.
 
     Возвращает ([(имя_папки_заказа, путь_к_папке, путь_к_bln), ...], warnings,
-    stats); порядок — по имени папки, то есть по номеру заказа. stats нужен
-    для итогового окна после разбора (см. parse_bln_folder).
+    stats); порядок — по имени папки, то есть по номеру заказа.
     """
     try:
         entries = sorted(os.listdir(day_dir))
@@ -1139,14 +1130,17 @@ def parse_bln_folder(day_dir, progress=None, only_dirs=None):
     предупреждения, а остальные заказы разбираются дальше.
 
     Возвращает (None, results, warnings, stats) — как parse_bln_sketches,
-    только общего номера заказа нет (он свой в каждой строке), плюс stats
-    для итогового окна после разбора (см. _show_folder_summary). В stats же
-    едут найденные рядом PDF эскизов и пути папок заказов: искать их потом
-    заново по строкам таблицы было бы неоткуда (номер заказа ≠ имя папки).
+    только общего номера заказа нет (он свой в каждой строке). В stats едут
+    найденные рядом PDF эскизов, пути папок заказов и пути папок с битыми
+    .bln: искать их потом заново по строкам таблицы было бы неоткуда (номер
+    заказа ≠ имя папки).
     """
     files, warnings, stats = find_order_bln_files(day_dir, only_dirs)
-    stats.update(parsed_ok=0, failed=0, failed_orders=[], orders_with_sketches=0,
-                 sketches=0, sketch_pdfs=[], order_dir_paths={})
+    # failed_dirs — ПУТИ папок заказов, чей .bln не прочёлся: по ним
+    # приложение дописывает в имя папки "[ОШИБКА]" (см. _mark_failed_orders).
+    stats.update(parsed_ok=0, failed=0, failed_orders=[], failed_dirs=[],
+                 orders_with_sketches=0, sketches=0, sketch_pdfs=[],
+                 order_dir_paths={})
     if not files:
         warnings.append(
             "В выбранной папке не нашлось ни одного файла .bln. Нужна папка дня, "
@@ -1165,6 +1159,7 @@ def parse_bln_folder(day_dir, progress=None, only_dirs=None):
         except Exception as e:  # noqa: BLE001 — текст ошибки покажем пользователю
             stats["failed"] += 1
             stats["failed_orders"].append(order_dir_name)
+            stats["failed_dirs"].append(order_dir)
             warnings.append(
                 f"{order_dir_name}: не удалось прочесть файл {os.path.basename(path)} — {e}"
             )
@@ -1179,8 +1174,9 @@ def parse_bln_folder(day_dir, progress=None, only_dirs=None):
             row["order_from_content"] = (
                 row["order_from_content"] or file_order or order_dir_name
             )
-            # Номер заказа -> папка заказа: нужно, чтобы после копирования
-            # пометить обработанные папки (см. _mark_copied_orders).
+            # Номер заказа -> папка заказа: нужно, чтобы после просмотра
+            # пометить "❌" заказы, где ничего не взяли в работу (см.
+            # _mark_orders_without_work).
             stats["order_dir_paths"].setdefault(row["order_from_content"], order_dir)
         results.extend(file_results)
         # Предупреждения каждого заказа — с номером заказа впереди, иначе в
@@ -1839,8 +1835,12 @@ class OrderSelectionDialog(ctk.CTkToplevel):
     """Какие заказы из папки дня разбирать — второй этап отбора.
 
     Показывается только тогда, когда в папке дня есть помеченные папки, то
-    есть первый этап ("Пометить заказы") уже прошёл. Без меток разбираем всё
-    подряд, как раньше, и лишнего окна не появляется.
+    есть первая фильтрация ("Отсортировать заказы") уже прошла. Без меток
+    разбираем всё подряд, как раньше, и лишнего окна не появляется.
+
+    По умолчанию отмечены заказы с чистым именем (первая фильтрация их не
+    тронула — значит эскизы есть); "❌" и "[ОШИБКА]" сняты, но отметить их
+    руками можно.
 
     По умолчанию отмечены заказы с ➜ (эскизы есть) и вообще без метки; ❌ и
     уже обработанные "•" сняты — но любой можно отметить руками.
@@ -1867,8 +1867,7 @@ class OrderSelectionDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             content,
-            text=f"Отмечены заказы с эскизами ({MARK_HAS_SKETCHES}). "
-                 f"Снимите лишние или добавьте нужные:",
+            text="Отмечены заказы с эскизами. Снимите лишние или добавьте нужные:",
             text_color=colors["text"], wraplength=520, justify="left",
         ).grid(row=0, column=0, padx=20, pady=(20, 8), sticky="w")
 
@@ -1879,10 +1878,12 @@ class OrderSelectionDialog(ctk.CTkToplevel):
         )
         scroll.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="nsew")
 
-        for name, mark, has_bln in entries:
+        for name, state, has_bln in entries:
             # Заказ без .bln разобрать всё равно не выйдет — показываем, но
             # отмечать не даём, чтобы не искать потом причину пустой строки.
-            preselect = has_bln and mark in (MARK_HAS_SKETCHES, None)
+            # "❌" и "[ОШИБКА]" сняты: по ним первая фильтрация уже сказала,
+            # что эскизов нет или что файл не читается.
+            preselect = has_bln and state is None
             var = tk.BooleanVar(value=preselect)
             if has_bln:
                 # Заказы без .bln в self._vars не кладём вовсе — тогда и
@@ -2540,7 +2541,8 @@ class SketchExtractorApp:
         self.sketch_pdf_paths = []  # выбранные PDF с эскизами (см. set_sketch_pdfs)
         self._sketch_pdfs_auto = False  # нашлись сами в папках заказов, а не выбраны
         # {номер заказа: папка заказа} последнего разбора — по ней после
-        # копирования папка помечается "•" (см. _mark_copied_orders).
+        # просмотра помечаются "❌" заказы, где ничего не взяли в работу
+        # (см. _mark_orders_without_work).
         self.order_dir_paths = {}
         # Ручные переопределения из диалога "Что копировать":
         # {("Описание", "Материал"): копировать_ли} — см. _row_group_key.
@@ -3039,6 +3041,7 @@ class SketchExtractorApp:
             f"кромка: {len(edge_rows)}    •    "
             f"{OTHER_MACHINE_NAME}: {len(other_rows)}"
         )
+        self._mark_orders_without_work()
 
     def open_log_dialog(self):
         LogDialog(
@@ -3480,9 +3483,10 @@ class SketchExtractorApp:
         self._sketch_pdfs_auto = bool(auto and paths)
 
     def mark_day_folder(self):
-        """Первый этап отбора: пройтись по папкам заказов в папке дня и
-        пометить каждую — ❌ (эскизов нет нигде) или ➜ (есть). Дальше можно
-        просто смотреть на имена папок, не открывая заказы по одному."""
+        """Первая фильтрация: пройтись по папкам заказов в папке дня и
+        дописать пометку ТОЛЬКО тем, которые можно не открывать — "❌"
+        (эскизов нет нигде) и "[ОШИБКА]" (.bln не читается). Остальные папки
+        не переименовываются вовсе: чистое имя и значит "эскизы есть"."""
         path = self.path_entry.get().strip()
         if not path or not os.path.isdir(path):
             path = filedialog.askdirectory(title="Выберите папку дня для пометки заказов")
@@ -3502,31 +3506,29 @@ class SketchExtractorApp:
         for w in warnings:
             self.log(f"⚠ {w}")
 
-        # Всего папок — сумма всех помеченных плюс уже обработанные: это то
-        # число, с которым пользователь сверяется глазами в проводнике.
-        total = (stats["with_sketches"] + stats["without_sketches"]
-                 + stats["unreadable"] + stats["already_done"])
+        total = stats["with_sketches"] + stats["without_sketches"] + stats["unreadable"]
         lines = [
             f"Папка: {os.path.basename(os.path.normpath(path))}",
             "",
             f"Всего папок заказов: {total}",
             "",
-            f"{MARK_HAS_SKETCHES}  Эскизы есть: {stats['with_sketches']}",
-            f"{MARK_NO_SKETCHES}  Эскизов нет: {stats['without_sketches']}",
-            f"{MARK_CHECK}  Не удалось прочесть .bln: {stats['unreadable']}",
+            f"Эскизы есть (имя не тронуто): {stats['with_sketches']}",
+            f"{ORDER_MARK_NO_SKETCHES}  Эскизов нет: {stats['without_sketches']}",
+            f"{ORDER_ERROR_PREFIX}  Не удалось прочесть .bln: {stats['unreadable']}",
         ]
-        if stats["already_done"]:
-            lines.append(f"{MARK_DONE}  Уже обработаны (не трогали): {stats['already_done']}")
+        if stats["cleaned"]:
+            lines.append(f"Снято устаревших пометок: {stats['cleaned']}")
         if stats["not_order_dirs"]:
             lines.append(f"Не похожи на папки заказов (пропущены): {stats['not_order_dirs']}")
         if warnings:
             lines += ["", 'Были замечания — подробности в кнопке "Логи".']
-        lines += ["", f'Теперь выгрузите эскизы в заказах с {MARK_HAS_SKETCHES} и нажмите '
-                      f'"Разобрать" — программа спросит, какие заказы брать.']
-        self.show_message("Заказы помечены", "\n".join(lines), justify="left")
+        lines += ["", 'Теперь выгрузите эскизы в заказах без пометки и нажмите '
+                      '"Разобрать заказы" — программа спросит, какие брать.']
+        self.show_message("Заказы отсортированы", "\n".join(lines), justify="left")
         self.status_var.set(
-            f"Помечено: {MARK_HAS_SKETCHES} {stats['with_sketches']}  "
-            f"{MARK_NO_SKETCHES} {stats['without_sketches']}"
+            f"Эскизы есть: {stats['with_sketches']}  "
+            f"{ORDER_MARK_NO_SKETCHES} {stats['without_sketches']}  "
+            f"{ORDER_ERROR_PREFIX} {stats['unreadable']}"
         )
 
     def on_type_change(self, choice=None):
@@ -3685,6 +3687,10 @@ class SketchExtractorApp:
             self._fill_results(kind, path, order_number, results, warnings)
             self._use_found_sketch_pdfs(stats.get("sketch_pdfs") or [])
             self._show_folder_summary(path, stats)
+            # Заказы, чей .bln не прочёлся, помечаем "[ОШИБКА]" прямо тут:
+            # смотреть их придётся руками, и видно это должно быть в
+            # проводнике, а не только в журнале.
+            self._mark_failed_orders(stats.get("failed_dirs") or [])
             # Заказы выбраны, таблица есть, эскизы нашлись — сразу к просмотру:
             # ради него всё и затевалось, лишний клик тут ни к чему. Без
             # pypdfium2 показывать нечего, и ругаться на это после каждого
@@ -3738,6 +3744,25 @@ class SketchExtractorApp:
                       'Подробности с номерами заказов — в кнопке "Логи".']
 
         self.show_message("Разбор папки дня завершён", "\n".join(lines), justify="left")
+    def _mark_failed_orders(self, failed_dirs):
+        """Папки заказов, чей .bln не удалось прочесть, получают префикс
+        "[ОШИБКА]" — тот же, что и при первой фильтрации. Не открылась ни
+        модель, ни эскизы в ней: разбираться придётся руками, и пометка
+        должна быть видна прямо в проводнике."""
+        for order_dir in sorted(set(failed_dirs)):
+            if not order_dir or not os.path.isdir(order_dir):
+                continue
+            name = os.path.basename(os.path.normpath(order_dir))
+            new_name = order_name_for_state(name, ORDER_STATE_ERROR)
+            if new_name == name:
+                continue
+            new_dir = os.path.join(os.path.dirname(order_dir), new_name)
+            try:
+                os.rename(order_dir, new_dir)
+            except OSError as e:
+                self.log(f'⚠ Не удалось переименовать папку заказа "{name}" — {e}')
+                continue
+            self._rebase_paths(order_dir, new_dir)
 
     def _fill_results(self, kind, path, order_number, results, warnings):
         if kind == "bazis":
@@ -3872,34 +3897,34 @@ class SketchExtractorApp:
             f"Скопировано в буфер: {len(row_values)} из {len(self.current_rows)} строк"
         )
         self.flash_copy_button()
-        self._mark_copied_orders({row["order"] for row in self.current_rows if row["include"]})
 
-    def _mark_copied_orders(self, orders):
-        """Папки скопированных заказов помечаем "•" — видно прямо в
-        проводнике, что заказ уже разнесён по таблице и открывать его снова
-        не надо. Метка одна на папку, так что "➜" при этом заменяется.
+    def _mark_orders_without_work(self):
+        """Заказы, где после просмотра ничего не взято в работу, помечаем "❌".
+
+        Смысл тот же, что и у первой фильтрации: заказ, по которому делать
+        нечего, не должен больше попадаться на глаза. Только там "❌" значит
+        "эскизов нет", а тут — "эскизы были, нужного в них не оказалось".
 
         Переименование может не пройти (папка открыта в проводнике, нет
-        прав) — это не повод ронять копирование, о котором пользователь уже
-        получил подтверждение: пишем в журнал и идём дальше."""
-        renamed = []
-        for order in sorted(o for o in orders if o):
-            order_dir = self.order_dir_paths.get(order)
-            if not order_dir or not os.path.isdir(order_dir):
+        прав) — это не повод ронять всё остальное: пишем в журнал и идём
+        дальше."""
+        if not self.order_dir_paths:
+            return
+        worked = {row["order"] for row in self.current_rows if row["include"]}
+        for order, order_dir in sorted(self.order_dir_paths.items()):
+            if order in worked or not order_dir or not os.path.isdir(order_dir):
                 continue
             name = os.path.basename(os.path.normpath(order_dir))
-            if order_mark_of(name) == MARK_DONE:
+            new_name = order_name_for_state(name, ORDER_STATE_NO_SKETCHES)
+            if new_name == name:
                 continue
+            new_dir = os.path.join(os.path.dirname(order_dir), new_name)
             try:
-                new_dir = set_order_dir_mark(order_dir, MARK_DONE)
+                os.rename(order_dir, new_dir)
             except OSError as e:
                 self.log(f'⚠ Не удалось переименовать папку заказа "{name}" — {e}')
                 continue
-            if new_dir != order_dir:
-                self._rebase_paths(order_dir, new_dir)
-                renamed.append(os.path.basename(new_dir))
-        if renamed:
-            self.log(f"Папки помечены как обработанные ({MARK_DONE}): {', '.join(renamed)}")
+            self._rebase_paths(order_dir, new_dir)
 
     def _rebase_paths(self, old_dir, new_dir):
         """Папку переименовали — чиним все запомненные пути, которые вели
