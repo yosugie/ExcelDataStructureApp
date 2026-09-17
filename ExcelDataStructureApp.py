@@ -1711,6 +1711,65 @@ class MessageDialog(ctk.CTkToplevel):
         self.wait_window()
 
 
+class ConfirmDialog(ctk.CTkToplevel):
+    """MessageDialog с двумя кнопками: "продолжить" и "назад".
+
+    Нужен там, где продолжать имеет смысл не всегда — например когда выгрузка
+    эскизов оказалась неполной: можно посмотреть что есть, а можно вернуться и
+    выгрузить заказ заново (см. _warn_incomplete_export). self.result — True,
+    если нажали продолжение; False или закрыли окно — назад."""
+
+    def __init__(self, master, colors, icon_images, theme, title, message,
+                 ok_text="Продолжить", cancel_text="Назад"):
+        super().__init__(master)
+        self.title(title)
+        self.resizable(False, False)
+        self.configure(fg_color=colors["bg"])
+        self.transient(master)
+        _apply_window_icon(self, icon_images, theme)
+        set_windows_dark_titlebar(self, dark=(theme == "dark"))
+
+        self.result = False
+
+        content = ctk.CTkFrame(
+            self, fg_color=colors["card"], corner_radius=16,
+            border_width=1, border_color=colors["border"],
+        )
+        content.grid(row=0, column=0, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            content, text=message, text_color=colors["text"],
+            wraplength=420, justify="left", anchor="w",
+        ).grid(row=0, column=0, padx=32, pady=(28, 16), sticky="w")
+
+        btn_row = ctk.CTkFrame(content, fg_color=colors["card"])
+        btn_row.grid(row=1, column=0, pady=(0, 24))
+        ctk.CTkButton(
+            btn_row, text=cancel_text, command=self.destroy, width=120, height=32,
+            corner_radius=20, fg_color=colors["card"], hover_color=colors["input"],
+            text_color=colors["text"], border_width=1, border_color=colors["border"],
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text=ok_text, command=self._accept, width=140, height=32,
+            corner_radius=20, fg_color=colors["accent"],
+            hover_color=colors["accent_hover"], text_color=colors["accent_text"],
+        ).pack(side="left")
+
+        self.bind("<Return>", lambda e: self._accept())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        self.focus_force()
+        self.wait_window()
+
+    def _accept(self):
+        self.result = True
+        self.destroy()
+
 
 class ExcludeSelectionDialog(ctk.CTkToplevel):
     """Список всех видов деталей текущего разбора — с галочками "исключить".
@@ -1841,8 +1900,8 @@ class OrderSelectionDialog(ctk.CTkToplevel):
     тронула — значит эскизы есть); "❌" и "[ОШИБКА]" сняты, но отметить их
     руками можно.
 
-    По умолчанию отмечены заказы с ➜ (эскизы есть) и вообще без метки; ❌ и
-    уже обработанные "•" сняты — но любой можно отметить руками.
+    Кнопка "Отмена" тут обязательна: следом за разбором сразу открывается
+    "Просмотр эскизов", и без неё выйти из этой цепочки было бы негде.
 
     self.result — множество имён папок или None, если закрыли/отменили."""
 
@@ -1902,7 +1961,7 @@ class OrderSelectionDialog(ctk.CTkToplevel):
         for text, command in (
             ("Выбрать всё", lambda: self._set_all(True)),
             ("Снять все", lambda: self._set_all(False)),
-            ("Отмена", self.destroy),
+            ("Отмена (назад)", self.destroy),
         ):
             ctk.CTkButton(
                 btn_row, text=text, command=command, width=110, height=32,
@@ -2959,6 +3018,11 @@ class SketchExtractorApp:
             return
 
         rows = [self.current_rows[i] for i in self._review_rows]
+        # Неполная выгрузка ловится ДО открытия просмотра: без этого
+        # пользователь узнавал о браке, только пролистав весь заказ.
+        if not self._confirm_sketch_export(rows, index):
+            return
+
         # Дальше окно живёт своими номерами строк — позициями в этом
         # списке; обратно в номера строк таблицы их переводит
         # _apply_review_marks по self._review_rows.
@@ -2970,6 +3034,41 @@ class SketchExtractorApp:
             self.root, THEMES[self.theme], self._icon_imgs, self.theme,
             rows, index, marked, skipped, self.keybinds, self._apply_review_marks,
         )
+
+    def _confirm_sketch_export(self, rows, index):
+        """Проверка "выгрузка полная?" перед просмотром.
+
+        Реальный случай: пользователь выгрузил из Базиса 4 эскиза, а в папку
+        легли только 2 — два файла оказались повреждены и не выгрузились
+        вовсе. Данные этих деталей в таблице есть (они читаются из .bln), а
+        чертежей нет, и раньше это выяснялось только при листании.
+
+        Возвращает True, если просмотр открывать. Продолжить можно всегда —
+        часть эскизов посмотреть лучше, чем ничего, — но решает пользователь:
+        он же может вместо этого вернуться и выгрузить заказ заново."""
+        if not index:
+            return True  # эскизов нет вообще — об этом скажет само окно
+        _with_img, rows_without, keys_unused = sketch_match_report(rows, index)
+        if keys_unused:
+            self.log("⚠ Чертежи, не подошедшие ни к одной строке: " + _short_list(keys_unused))
+        if not rows_without:
+            return True
+        self.log(f"⚠ Выгрузка эскизов неполная, без чертежа остались "
+                 f"{len(rows_without)}: " + _short_list(rows_without))
+        dialog = ConfirmDialog(
+            self.root, THEMES[self.theme], self._icon_imgs, self.theme,
+            "Выгрузка эскизов неполная",
+            f"Деталей в заказе: {len(rows)}, а чертежей нашлось только "
+            f"{len(rows) - len(rows_without)}.\n\n"
+            f"Без чертежа остались: {_short_list(rows_without)}\n\n"
+            "Похоже, файл с браком и выгрузились не все эскизы — такое бывает, "
+            "когда часть эскизов в библиотеке повреждена. Выгрузите заказ из "
+            "Базиса заново и разберите ещё раз.\n\n"
+            "Можно и посмотреть то, что есть, — решения по деталям без чертежа "
+            "придётся принимать по названию и материалу.",
+            ok_text="Всё равно смотреть", cancel_text="Назад",
+        )
+        return bool(dialog.result)
 
     def _apply_review_marks(self, marked, skipped):
         """Отмеченные "в работу" копируются, всё остальное — нет.
