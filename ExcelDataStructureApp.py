@@ -637,15 +637,6 @@ def is_assembly_filename(name):
     return bool(ASSEMBLY_WORD_RE.search(name or ""))
 
 
-def not_machinable_warning(what_and_count):
-    """Общий хвост предупреждений про строки, снятые с копирования — один на
-    оба разборщика, чтобы формулировка не разъезжалась при правках."""
-    return (
-        f"{what_and_count} — показаны в таблице серым, копирование по умолчанию "
-        f'исключено (можно поправить в "Что копировать").'
-    )
-
-
 # Ключи строки результата, общие для обоих разборщиков (.bln и .pdf):
 #   order_from_content  — номер заказа, найденный внутри самого документа
 #   part_code           — номер детали ("01 006", "ICN21433045", "a; b")
@@ -699,9 +690,6 @@ def parse_bln_sketches(bln_path):
     results = []
     order_votes = {}
 
-    n_assembly = 0
-    n_not_machinable = 0
-
     for dir_name, fname, storage in candidates:
         order_number = None
         part_codes = []
@@ -751,7 +739,6 @@ def parse_bln_sketches(bln_path):
         not_processed = not_processed_reason(is_assembly, material, description, thickness_mm)
 
         if is_assembly:
-            n_assembly += 1
             sec_m = ASSEMBLY_SECTION_RE.search(fname)
             if sec_m:
                 section = sec_m.group(1)
@@ -762,19 +749,14 @@ def parse_bln_sketches(bln_path):
             part_codes = [f"{section} СБ" if section else "СБ"]
             if not description:
                 description = os.path.splitext(fname)[0]
-        elif is_too_thin or is_excluded_name or is_glass:
-            n_not_machinable += 1
 
         if not part_codes:
             warnings.append(f'Не удалось определить код детали для "{fname}" — пропущено.')
             continue
 
-        if len(part_codes) > 1:
-            sheet_label = os.path.splitext(fname)[0]
-            warnings.append(
-                f'Лист {sheet_label}: на одном чертеже найдено несколько деталей '
-                f'({" / ".join(part_codes)}) — добавлена отдельная строка для каждой.'
-            )
+        # Несколько деталей на одном листе (заготовка пилится на две) — дело
+        # обычное, каждая получает свою строку. В журнал об этом не пишем:
+        # там только ошибки (см. SketchExtractorApp.log).
 
         if order_number:
             order_votes[order_number] = order_votes.get(order_number, 0) + 1
@@ -789,16 +771,10 @@ def parse_bln_sketches(bln_path):
                 "not_processed": not_processed,
             })
 
-    if n_not_machinable:
-        warnings.append(not_machinable_warning(
-            f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-            f"{n_not_machinable}"
-        ))
-
-    if n_assembly:
-        warnings.append(not_machinable_warning(
-            f"Найдено сборочных чертежей (СБ): {n_assembly}"
-        ))
+    # ИСТОРИЯ: тут были предупреждения "Найдено деталей, которые не идут в
+    # работу..." и "Найдено сборочных чертежей (СБ)". Убраны: это и так
+    # видно по серым строкам в таблице, а в журнале они только краснели.
+    # Не возвращать без явной просьбы.
 
     # Итоговый номер заказа: приоритет — то, что реально найдено внутри чертежей
     # (самое частое совпадение), а не имя файла .bln, которое могут переименовать.
@@ -1510,15 +1486,6 @@ def parse_pdf_sketches(pdf_path):
     if n_missing_part:
         warnings.append(
             f'Номер детали не найден на {n_missing_part} стр. из {len(results)} — отмечено "Не найдено".'
-        )
-
-    n_not_machinable = sum(1 for r in results if r.get("auto_exclude"))
-    if n_not_machinable:
-        warnings.append(
-            not_machinable_warning(
-                f"Найдено деталей, которые не идут в работу на станке {MACHINE_NAME}: "
-                f"{n_not_machinable}"
-            )
         )
 
     if not results:
@@ -2989,22 +2956,12 @@ class SketchExtractorApp:
                     f"Эскизы от заказа {', '.join(sorted(orders))}, а в таблице "
                     f"{', '.join(sorted(row_orders))} — похоже, выбраны файлы не того заказа."
                 )
+        # В журнал идут только настоящие проблемы: не найденные файлы, битые
+        # PDF, эскизы не от того заказа. Сводка "сколько с чертежом" туда
+        # больше не пишется — это не ошибка, и пользователь видит её в самом
+        # окне просмотра (см. счётчик).
         for w in warnings:
             self.log(f"⚠ {w}")
-
-        # Сверка: связь идёт по полному коду детали, вслепую ничего не
-        # подставляется — значит убедиться, что "всё сошлось", можно только
-        # посчитав обе стороны. Оба остатка нулевые — сошлось всё.
-        if index:
-            with_img, rows_without, keys_unused = sketch_match_report(self.current_rows, index)
-            self.log(
-                f"Сверка эскизов: строк {len(self.current_rows)}, с чертежом {with_img}, "
-                f"без чертежа {len(rows_without)}; чертежей без строки: {len(keys_unused)}"
-            )
-            if rows_without:
-                self.log("⚠ Без чертежа остались: " + _short_list(rows_without))
-            if keys_unused:
-                self.log("⚠ Чертежи, не подошедшие ни к одной строке: " + _short_list(keys_unused))
 
         # Детали, которые на станке не обрабатываются (сборка, стекло/
         # зеркало, тонкий материал), в просмотр не попадают: решать по ним
@@ -3012,9 +2969,6 @@ class SketchExtractorApp:
         # В таблицу и в буфер они при этом идут как все.
         self._review_rows = [i for i, row in enumerate(self.current_rows)
                              if not row.get("not_processed")]
-        hidden = len(self.current_rows) - len(self._review_rows)
-        if hidden:
-            self.log(f"В просмотр не попали (не обрабатываются): {hidden}")
         if not self._review_rows:
             self.show_message(
                 "Нечего смотреть",
@@ -3307,6 +3261,11 @@ class SketchExtractorApp:
         )
 
     def log(self, message):
+        """Журнал — ТОЛЬКО про ошибки: не открылся файл, не прочёлся .bln, не
+        выгрузились эскизы, не переименовалась папка. Всё остальное (сколько
+        строк скопировано, сколько деталей не идёт в работу, сколько эскизов
+        нашлось) пользователь и так видит в таблице и в строке состояния, а в
+        журнале это только тонуло между настоящими ошибками."""
         self.log_lines.append(message)
         self._refresh_log_btn()
 
@@ -3542,11 +3501,6 @@ class SketchExtractorApp:
 
         for w in warnings:
             self.log(f"⚠ {w}")
-        self.log(
-            f"Помечено заказов: {MARK_HAS_SKETCHES} {stats['with_sketches']}, "
-            f"{MARK_NO_SKETCHES} {stats['without_sketches']}, "
-            f"{MARK_CHECK} {stats['unreadable']}"
-        )
 
         # Всего папок — сумма всех помеченных плюс уже обработанные: это то
         # число, с которым пользователь сверяется глазами в проводнике.
@@ -3756,8 +3710,6 @@ class SketchExtractorApp:
         if not paths:
             return
         self.set_sketch_pdfs(paths, auto=True)
-        self.log(f"Найдено файлов эскизов (PDF) в папках заказов: {len(paths)}")
-
     def _show_folder_summary(self, day_dir, stats):
         """Итог разбора папки дня отдельным окном — чтобы сразу было видно,
         сколько заказов нашлось и сколько из них реально разобрано, не лазая
@@ -3867,7 +3819,6 @@ class SketchExtractorApp:
             # Заказы считаем по самим строкам: папка без .bln или с битой
             # библиотекой сюда не попадёт (о ней уже сказано в журнале).
             n_orders = len({r["order"] for r in self.current_rows if r["order"]})
-            self.log(f"Разобрано заказов: {n_orders}, эскизов: {len(results)}")
             self.status_var.set(f"Найдено эскизов: {len(results)} (заказов: {n_orders})")
         else:
             self.status_var.set(f"Найдено эскизов: {len(results)}")
@@ -3915,16 +3866,11 @@ class SketchExtractorApp:
         text = "\n".join("\t".join(values) for values in row_values)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        # Пишем обе цифры: пользователь сверяет "сколько эскизов получил за
-        # день — столько же строк в отчёте".
-        if len(row_values) == len(self.current_rows):
-            self.log(f"Строк скопировано: {len(row_values)} — все строки разбора")
-        else:
-            self.log(
-                f"Строк скопировано: {len(row_values)} из {len(self.current_rows)} "
-                f'(часть видов снята в "Что копировать")'
-            )
-        self.status_var.set(f"Скопировано в буфер: {len(row_values)} строк")
+        # Обе цифры — в строке состояния, а не в журнале: журнал теперь
+        # только для ошибок (см. log).
+        self.status_var.set(
+            f"Скопировано в буфер: {len(row_values)} из {len(self.current_rows)} строк"
+        )
         self.flash_copy_button()
         self._mark_copied_orders({row["order"] for row in self.current_rows if row["include"]})
 
