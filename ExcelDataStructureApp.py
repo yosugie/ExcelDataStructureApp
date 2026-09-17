@@ -2731,15 +2731,16 @@ class SketchExtractorApp:
         self.today_btn.pack(side="left")
         self._reg(self.today_btn, "secondary_button")
 
-        # Этапы подряд, слева направо — в том порядке, в каком их нажимают
-        # (см. "Два этапа работы с папкой дня" в CLAUDE.md). Обе кнопки
-        # самодостаточные: если путь не указан, сами спросят папку.
+        # "Действия" — вспомогательные операции над папкой дня, слева
+        # направо в том порядке, в каком их нажимают (см. "Два этапа работы
+        # с папкой дня" в CLAUDE.md). Обе кнопки самодостаточные: если путь
+        # не указан, сами спросят папку.
         stage_row = ctk.CTkFrame(main_card, fg_color=t["card"])
         stage_row.pack(fill="x", padx=16, pady=(10, 14))
         self._reg(stage_row, "plain_frame")
-        # Ярлык и обе кнопки прячутся целиком в режиме inSight — там этапов
-        # нет (см. on_source_mode_change), поэтому держим их под рукой.
-        self.stage_label = ctk.CTkLabel(stage_row, text="Этапы:", width=label_width, anchor="w")
+        # Ярлык и обе кнопки прячутся целиком в режиме inSight — там
+        # действий нет (см. on_source_mode_change), поэтому держим их под рукой.
+        self.stage_label = ctk.CTkLabel(stage_row, text="Действия:", width=label_width, anchor="w")
         self.stage_label.pack(side="left")
         self._reg(self.stage_label, "label")
 
@@ -2750,12 +2751,15 @@ class SketchExtractorApp:
         self.mark_btn.pack(side="left")
         self._reg(self.mark_btn, "secondary_button")
 
+        # Обе кнопки этого ряда — нейтральные, одного вида. Акцентная заливка
+        # в окне ровно одна, у "Скопировать строки"; синяя кнопка здесь
+        # выглядела главным действием окна, хотя главное действие не тут.
         self.parse_btn = ctk.CTkButton(
-            stage_row, text="Разобрать и отметить", command=self.run_parse,
+            stage_row, text="Разобрать заказы", command=self.run_parse,
             height=36, width=210, corner_radius=20,
         )
         self.parse_btn.pack(side="left", padx=(8, 0))
-        self._reg(self.parse_btn, "accent_button")
+        self._reg(self.parse_btn, "secondary_button")
 
         self.exclude_btn = ctk.CTkButton(
             stage_row, text="Исключить", command=self.open_exclude_dialog,
