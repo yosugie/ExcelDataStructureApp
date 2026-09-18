@@ -624,6 +624,28 @@ def looks_like_sketch_filename(name):
     return bool(SKETCH_FILENAME_RE.search(name or ""))
 
 
+# ЗАПАСНОЙ признак эскиза: имя файла НАЧИНАЕТСЯ с кода детали — "01 001
+# (Панель).ldw", иногда с номером заказа впереди ("217684 01 001 (...)").
+# Так Базис называет чертежи деталей, когда конструктор не заводил папку
+# "эск" вовсе: все чертежи лежат в общей куче рядом с моделью.
+PART_DRAWING_NAME_RE = re.compile(r"^\s*(?:\d{5,7}\s+)?\d{2}\s+\d{3}\b")
+
+
+def looks_like_part_drawing(name):
+    """Чертёж детали, опознанный по коду в начале имени.
+
+    ВАЖНО: признак нарочно НЕ используется наравне с остальными, только как
+    запасной (см. parse_bln_sketches). В обычной библиотеке рядом с папкой
+    "эск" лежит ещё и модель, а в ней — чертежи ВСЕХ деталей заказа с такими
+    же именами: в заказе 217464 это 9 эскизов в "эск" против 43 чертежей в
+    папке модели. Считать эскизами и те и другие — значит впятеро раздуть
+    таблицу."""
+    name = (name or "").strip()
+    if name.lower().endswith(".b3d"):
+        return False  # это сама модель, а не чертёж
+    return bool(PART_DRAWING_NAME_RE.match(name))
+
+
 def is_assembly_filename(name):
     """Сборочный чертёж (СБ) — показываем в таблице для проверки, но не
     копируем как отдельную деталь (это не то же самое, что "деталь")."""
@@ -659,26 +681,45 @@ def parse_bln_sketches(bln_path):
     except ET.ParseError as e:
         raise CfbReadError(f"Не удалось разобрать внутренний XML-индекс: {e}")
 
-    def collect_files(parent, dir_name):
-        is_sketch_dir = looks_like_sketch_folder(dir_name)
-        for file_el in parent.findall("File"):
-            fname_el = file_el.find("Name")
-            storage_el = file_el.find("Storage")
-            if fname_el is None or storage_el is None or not fname_el.text:
-                continue
-            fname = fname_el.text
-            if is_sketch_dir or looks_like_sketch_filename(fname):
-                candidates.append((dir_name, fname, storage_el.text))
+    def collect_files(dir_name, match):
+        """Файлы библиотеки, подошедшие под признак match(имя папки, имя файла).
 
-    candidates = []
-    # Файлы, лежащие прямо в корне библиотеки, а не внутри папки — эскизы
-    # бывают и там (например "01 006 (Бок правый) эскиз 1..ldw" рядом с
-    # папками моделей). Раньше корень не просматривался вообще, и такие
-    # эскизы терялись молча.
-    collect_files(root, "")
-    for directory in root.findall("Directory"):
-        name_el = directory.find("Name")
-        collect_files(directory, name_el.text if name_el is not None else "")
+        Смотрим и корень библиотеки, и каждую папку: эскизы бывают и прямо в
+        корне (например "01 006 (Бок правый) эскиз 1..ldw" рядом с папками
+        моделей). Раньше корень не просматривался вообще, и такие эскизы
+        терялись молча."""
+        found = []
+        for parent, name in [(root, "")] + [
+            (d, (d.find("Name").text if d.find("Name") is not None else ""))
+            for d in root.findall("Directory")
+        ]:
+            for file_el in parent.findall("File"):
+                fname_el = file_el.find("Name")
+                storage_el = file_el.find("Storage")
+                if fname_el is None or storage_el is None or not fname_el.text:
+                    continue
+                if match(name, fname_el.text):
+                    found.append((name, fname_el.text, storage_el.text))
+        return found
+
+    candidates = collect_files(None, lambda dir_name, fname: (
+        looks_like_sketch_folder(dir_name) or looks_like_sketch_filename(fname)
+    ))
+    # ЗАПАСНОЙ разбор: в библиотеке нет ни папки "эск", ни имён с "Эск N" —
+    # значит конструктор не выделял эскизы вовсе, и чертежи деталей лежат в
+    # общей куче рядом с моделью ("01 001 (Панель).ldw"). Берём их по коду
+    # детали в начале имени. ТОЛЬКО как запасной вариант: там, где папка
+    # "эск" есть, те же имена носят чертежи ВСЕХ деталей заказа, и брать их
+    # заодно нельзя (см. looks_like_part_drawing).
+    if not candidates:
+        candidates = collect_files(None, lambda dir_name, fname: (
+            looks_like_part_drawing(fname) or is_assembly_filename(fname)
+        ))
+        if candidates:
+            warnings.append(
+                'В библиотеке нет папки "эск" — эскизы взяты по чертежам '
+                f"деталей рядом с моделью ({len(candidates)} шт.)."
+            )
 
     results = []
     order_votes = {}
@@ -924,8 +965,10 @@ def bln_has_sketches(bln_path):
 
     Читаем ТОЛЬКО служебный индекс $$Lib_structure$$ — для ответа "да/нет"
     этого достаточно, а полный разбор чертежей (parse_bln_sketches) на десяти
-    заказах был бы заметно дольше. Признаки те же, что и при разборе:
-    имя папки содержит "эск" ИЛИ в имени файла есть "Эск/Эскиз + номер".
+    заказах был бы заметно дольше. Признаки те же, что и при разборе: имя
+    папки содержит "эск" ИЛИ в имени файла есть "Эск/Эскиз + номер" ИЛИ (как
+    запасной вариант, если ничего из этого нет) имя файла начинается с кода
+    детали — "01 001 (Панель).ldw" (см. looks_like_part_drawing).
     """
     container = CfbContainer(bln_path)
     xml_raw = container.get_stream("$$Lib_structure$$")
@@ -936,14 +979,22 @@ def bln_has_sketches(bln_path):
     except ET.ParseError as e:
         raise CfbReadError(f"Не удалось разобрать внутренний XML-индекс: {e}")
 
+    parents = [root] + root.findall("Directory")
     for directory in root.findall("Directory"):
         name_el = directory.find("Name")
         if name_el is not None and looks_like_sketch_folder(name_el.text):
             return True
-    for file_el in root.findall("File"):
-        name_el = file_el.find("Name")
-        if name_el is not None and looks_like_sketch_filename(name_el.text):
-            return True
+    for parent in parents:
+        for file_el in parent.findall("File"):
+            name_el = file_el.find("Name")
+            if name_el is not None and looks_like_sketch_filename(name_el.text):
+                return True
+    # Запасной признак — чертежи деталей в общей куче, без папки "эск".
+    for parent in parents:
+        for file_el in parent.findall("File"):
+            name_el = file_el.find("Name")
+            if name_el is not None and looks_like_part_drawing(name_el.text):
+                return True
     return False
 
 
