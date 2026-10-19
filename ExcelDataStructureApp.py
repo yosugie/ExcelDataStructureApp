@@ -1710,6 +1710,94 @@ def index_sketch_pdfs(paths):
     return index, orders, warnings
 
 
+def _name_after_code(text, code_match):
+    """Название детали из штампа эскиза: строка СРАЗУ после строки с кодом.
+
+    Штамп Базиса в тексте выглядит так: "218377 01 001", потом "Фасад
+    ЛДСП", потом "_" и строка материала. Берём первую непустую строку после
+    кода, но только если она похожа на название: есть буквы, это не строка
+    материала и не очередной код. Нет названия — None, пусть остаётся пусто:
+    подставлять что попало нельзя."""
+    tail = text[code_match.end():]
+    for line in re.split(r"[\r\n]+", tail)[:4]:
+        line = line.strip()
+        if not line:
+            continue
+        if len(re.findall(r"[A-Za-zА-Яа-яЁё]", line)) < 2 or len(line) > 80:
+            return None
+        # Материал — "слово + толщина" ("ЛДСП 16 Дуб ..."). По списку категорий
+        # (MATERIAL_CATEGORY_WORDS) нельзя: там есть "Фасад", а это и название
+        # самой детали ("Фасад ЛДСП").
+        if MATERIAL_THICKNESS_RE.match(line) or "Артикул" in line:
+            return None
+        return line
+    return None
+
+
+def sketch_names_from_pdfs(paths):
+    """{ключ детали: название} по штампам выгруженных эскизов.
+
+    Запасной источник для колонки "Описание": у Базиса она берётся из скобок
+    в имени файла внутри .bln ("01 001 (Фасад ЛДСП).ldw"), а если конструктор
+    назвал файл без скобок, колонка оставалась пустой, хотя название
+    напечатано на самом эскизе. Связь — по тому же ПОЛНОМУ коду (заказ +
+    секция + деталь), что и у картинки, поэтому чужое название не подставится.
+    Любую ошибку чтения молча пропускаем: запасной способ не должен ронять
+    разбор."""
+    names = {}
+    if not HAS_PYPDFIUM:
+        return names
+    for path in paths:
+        try:
+            doc = pypdfium2.PdfDocument(path)
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            for page_index in range(len(doc)):
+                text = doc[page_index].get_textpage().get_text_range()
+                for m in SKETCH_PART_CODE_RE.finditer(text):
+                    name = _name_after_code(text, m)
+                    if name:
+                        names.setdefault(_part_key(*m.groups()), name)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            doc.close()
+    return names
+
+
+def fill_missing_descriptions(results, pdf_paths):
+    """Дописывает название в строки разбора .bln, у которых его нет.
+
+    Меняет results на месте и возвращает сколько строк дополнено. Название
+    влияет и на решения, которые принимаются по нему (зеркало, список
+    деталей "не на этот станок"), поэтому они пересчитываются заново. Сборочные
+    чертежи не трогаем: у них названия по смыслу нет."""
+    todo = [r for r in results
+            if not (r.get("description") or "").strip()
+            and r.get("not_processed") != NOT_PROCESSED_ASSEMBLY]
+    if not todo or not pdf_paths:
+        return 0
+    names = sketch_names_from_pdfs(pdf_paths)
+    if not names:
+        return 0
+    filled = 0
+    for r in todo:
+        found = [names[k] for k in part_keys_from_row(r) if k in names]
+        if not found:
+            continue
+        r["description"] = found[0]
+        filled += 1
+        if not r.get("not_processed"):
+            reason = not_processed_reason(
+                False, r.get("material"), found[0],
+                material_thickness_mm(r.get("material")))
+            r["not_processed"] = reason
+        r["auto_exclude"] = (bool(r.get("auto_exclude")) or bool(r.get("not_processed"))
+                             or is_excluded_part_name(found[0]))
+    return filled
+
+
 def render_sketch_page(path, page_index, box):
     """Страница эскиза как PIL-картинка, вписанная в рамку box=(ш, в).
 
@@ -3844,6 +3932,10 @@ class SketchExtractorApp:
         if status == "ok_folder":
             order_number, results, warnings, stats = payload
             self.order_dir_paths = dict(stats.get("order_dir_paths") or {})
+            # Название детали, которого нет в имени файла, берём из штампа
+            # выгруженного эскиза — ДО заполнения таблицы, потому что по
+            # названию принимаются и решения (зеркало, "не на этот станок").
+            fill_missing_descriptions(results, stats.get("sketch_pdfs") or [])
             self._fill_results(kind, path, order_number, results, warnings)
             self._use_found_sketch_pdfs(stats.get("sketch_pdfs") or [])
             # Заказы, чей .bln не прочёлся, помечаем "[ОШИБКА]" прямо тут:
@@ -3862,15 +3954,20 @@ class SketchExtractorApp:
                 self.open_review_dialog()
             return
 
-        self._fill_results(kind, path, *payload)
+        found_pdfs = []
         if kind == "bazis":
             # Одиночный .bln: папка заказа — та, где он лежит; эскизы, если
             # выгружены, лежат там же (подпапка "эск"/"Эскизы").
+            found_pdfs = find_sketch_pdfs_for_order(
+                os.path.dirname(os.path.abspath(path)))
+            fill_missing_descriptions(payload[1], found_pdfs)  # см. выше
+        self._fill_results(kind, path, *payload)
+        if kind == "bazis":
             order_dir = os.path.dirname(os.path.abspath(path))
             self.order_dir_paths = {
                 r["order"]: order_dir for r in self.current_rows if r.get("order")
             }
-            self._use_found_sketch_pdfs(find_sketch_pdfs_for_order(order_dir))
+            self._use_found_sketch_pdfs(found_pdfs)
 
     def _use_found_sketch_pdfs(self, paths):
         """Подставляет найденные рядом с заказами PDF эскизов. Если не нашлось
